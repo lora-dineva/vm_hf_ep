@@ -20,6 +20,8 @@ python describe_video.py video.mp4 --extract-frames-only
 python describe_video.py --config path/to/config.yaml video.mp4
 ```
 
+**Split video into scenes (PySceneDetect):** `python split_scenes.py [video] --output-dir scenes`. Use `--list-only` to only print scene boundaries. Uses system ffmpeg if on PATH, otherwise the imageio-ffmpeg bundled binary.
+
 **Langfuse: prompt and A/B testing**
 
 - Create a prompt named `video-description` in Langfuse (text type, e.g. "Describe the video.") and assign a label (e.g. `production`). The script fetches it by default; without Langfuse env it uses a built-in fallback.

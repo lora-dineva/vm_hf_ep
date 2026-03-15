@@ -4,6 +4,8 @@
 # Input / output
 video: "test_clip_60s.mp4"
 frames_dir: "frames"
+# When no video path is given, describe all .mp4 files in this directory (e.g. from split_scenes.py).
+scenes_dir: "scenes"
 
 # Hugging Face endpoint (override with HF_ENDPOINT env or --endpoint)
 endpoint: "https://rjk11aiy6oefykan.us-east-1.aws.endpoints.huggingface.cloud"

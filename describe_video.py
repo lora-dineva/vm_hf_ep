@@ -35,6 +35,7 @@ CHAT_PATH = "/v1/chat/completions"
 _DEFAULTS = {
     "video": "test_clip_60s.mp4",
     "frames_dir": "frames",
+    "scenes_dir": "scenes",
     "endpoint": "https://rjk11aiy6oefykan.us-east-1.aws.endpoints.huggingface.cloud",
     "model": "Qwen/Qwen3-VL-8B-Instruct",
     "max_tokens": 1024,
@@ -248,7 +249,8 @@ def main() -> None:
     cfg["endpoint"] = os.environ.get("HF_ENDPOINT") or cfg["endpoint"]
 
     parser = argparse.ArgumentParser(description="Describe a video via Hugging Face VL endpoint.")
-    parser.add_argument("video", nargs="?", default=cfg["video"], help="Video file path")
+    parser.add_argument("video", nargs="?", default=None, help="Video file path (if omitted, describe all .mp4 in --scenes-dir)")
+    parser.add_argument("--scenes-dir", default=cfg.get("scenes_dir") or "scenes", help="Directory of scene .mp4 files when no video path is given")
     parser.add_argument("--endpoint", default=cfg["endpoint"], help="Endpoint base URL")
     parser.add_argument("--model", default=cfg["model"], help="Model name")
     parser.add_argument("--max-tokens", type=int, default=cfg["max_tokens"], help="Max tokens")
@@ -266,6 +268,7 @@ def main() -> None:
 
     cfg = load_config(args.config if args.config else None)
     # Env / CLI overrides
+    cfg["scenes_dir"] = getattr(args, "scenes_dir", None) or cfg.get("scenes_dir") or "scenes"
     cfg["video"] = args.video
     cfg["endpoint"] = args.endpoint
     cfg["model"] = args.model
@@ -276,14 +279,30 @@ def main() -> None:
     cfg["prompt_name"] = args.prompt_name
     cfg["prompt_label"] = args.prompt_label
 
+    # Resolve video path(s): single file or all .mp4 in scenes_dir
+    if args.video and Path(args.video).is_file():
+        video_paths = [Path(args.video)]
+    else:
+        scenes_dir = Path(cfg["scenes_dir"])
+        if not scenes_dir.is_dir():
+            print(f"Error: No video file given and scenes dir not found: {scenes_dir}", file=sys.stderr)
+            sys.exit(1)
+        video_paths = sorted(scenes_dir.glob("*.mp4"))
+        if not video_paths:
+            print(f"Error: No .mp4 files in {scenes_dir}", file=sys.stderr)
+            sys.exit(1)
+        print(f"{LOG_PREFIX} describing {len(video_paths)} scene(s) from {scenes_dir}", file=sys.stderr)
+
     if args.extract_frames_only:
         prompt_text = (cfg.get("fallback_prompt") or _DEFAULTS["fallback_prompt"]).strip()
-        paths = extract_frames_to_dir(
-            args.video, cfg["frames_dir"], cfg["fps"], cfg["max_frames"], prompt_text,
-            cfg.get("image_patch_size", 16), cfg.get("jpeg_quality", 85), open_folder=True
-        )
-        for p in paths:
-            print(p)
+        for vp in video_paths:
+            out_dir = str(Path(cfg["frames_dir"]) / vp.stem) if len(video_paths) > 1 else cfg["frames_dir"]
+            paths = extract_frames_to_dir(
+                str(vp), out_dir, cfg["fps"], cfg["max_frames"], prompt_text,
+                cfg.get("image_patch_size", 16), cfg.get("jpeg_quality", 85), open_folder=(vp == video_paths[-1])
+            )
+            for p in paths:
+                print(p)
         return
 
     token = get_token()
@@ -299,11 +318,12 @@ def main() -> None:
         print(f"{LOG_PREFIX} A/B model: {trace_metadata['ab_model']} -> {model}", file=sys.stderr)
     cfg["model"] = model
 
-    print(f"{LOG_PREFIX} video={args.video!r}", file=sys.stderr)
-    t0 = time.perf_counter()
-    out = describe_video(args.video, cfg["endpoint"], token, cfg, prompt_text, langfuse_prompt, trace_metadata or None)
-    print(f"{LOG_PREFIX} wall: {time.perf_counter() - t0:.2f}s", file=sys.stderr)
-    print(out)
+    for idx, video_path in enumerate(video_paths, start=1):
+        print(f"{LOG_PREFIX} [{idx}/{len(video_paths)}] video={video_path.name!r}", file=sys.stderr)
+        t0 = time.perf_counter()
+        out = describe_video(str(video_path), cfg["endpoint"], token, cfg, prompt_text, langfuse_prompt, trace_metadata or None)
+        print(f"{LOG_PREFIX} wall: {time.perf_counter() - t0:.2f}s", file=sys.stderr)
+        print(f"[{video_path.name}] {out}")
 
     if _langfuse_configured():
         try:

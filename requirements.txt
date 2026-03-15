@@ -5,3 +5,6 @@ langfuse>=2.0.0
 openai>=1.0.0
 # Video sampling (fps, resize); requires torch/torchvision (install separately if needed).
 qwen-vl-utils>=0.0.10
+# Scene detection and splitting; uses imageio-ffmpeg's bundled ffmpeg if system ffmpeg not on PATH.
+scenedetect>=0.6
+imageio-ffmpeg>=0.5.0
