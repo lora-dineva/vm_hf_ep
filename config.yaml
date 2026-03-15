@@ -1,0 +1,29 @@
+# Video description app – adjust these values instead of CLI defaults.
+# CLI arguments still override these when provided.
+
+# Input / output
+video: "test_clip_60s.mp4"
+frames_dir: "frames"
+
+# Hugging Face endpoint (override with HF_ENDPOINT env or --endpoint)
+endpoint: "https://rjk11aiy6oefykan.us-east-1.aws.endpoints.huggingface.cloud"
+
+# Model and generation
+model: "Qwen/Qwen3-VL-8B-Instruct"
+max_tokens: 1024
+
+# Video sampling (qwen-vl-utils)
+fps: 2.0
+max_frames: 120
+image_patch_size: 16
+jpeg_quality: 85
+
+# Langfuse prompt (when Langfuse env is set)
+prompt_name: "video-description"
+prompt_label: "production"
+# Fallback prompt text when Langfuse is not used or fetch fails
+fallback_prompt: "Describe the video."
+
+# A/B testing (leave empty or omit to disable)
+# ab_prompt_labels: "prod-a,prod-b"
+# model_b: "Other/Model-Name"

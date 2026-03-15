@@ -1,43 +1,70 @@
 #!/usr/bin/env python3
 """
 Send a video file to a Hugging Face Inference Endpoint (Qwen3-VL) and print
-the model's description of what is happening in the clip.
-
-Video processing can use qwen-vl-utils (Qwen-style fps/resize) or opencv
-(single middle frame). Use --backend qwen-vl-utils when installed.
+the model's description. Video processing uses qwen-vl-utils (fps/resize sampling).
+Defaults and overrides: config.yaml (and CLI overrides config).
 """
 
 import argparse
 import base64
 import io
 import os
+import random
 import subprocess
 import sys
 import time
-from typing import List
+from pathlib import Path
+from typing import Any, List, Optional
 
 LOG_PREFIX = "[describe_video]"
 
-import cv2
-import requests
 from dotenv import load_dotenv
-
 load_dotenv()
 
-# Optional: qwen-vl-utils for Qwen-style video sampling (fps, resize)
-try:
-    from qwen_vl_utils import process_vision_info
-    _QWEN_VL_UTILS_AVAILABLE = True
-except ImportError:
-    process_vision_info = None
-    _QWEN_VL_UTILS_AVAILABLE = False
+from langfuse import get_client
+from langfuse.openai import OpenAI as LangfuseOpenAI
+from qwen_vl_utils import process_vision_info
 
-DEFAULT_VIDEO = "test_clip_60s.mp4"
-DEFAULT_ENDPOINT = "https://rjk11aiy6oefykan.us-east-1.aws.endpoints.huggingface.cloud"
+# -----------------------------------------------------------------------------
+# Config (config.yaml + env overrides)
+# -----------------------------------------------------------------------------
+
+CONFIG_PATH = Path(__file__).resolve().parent / "config.yaml"
 CHAT_PATH = "/v1/chat/completions"
-PROMPT = """
-Describe the video.
-"""
+
+_DEFAULTS = {
+    "video": "test_clip_60s.mp4",
+    "frames_dir": "frames",
+    "endpoint": "https://rjk11aiy6oefykan.us-east-1.aws.endpoints.huggingface.cloud",
+    "model": "Qwen/Qwen3-VL-8B-Instruct",
+    "max_tokens": 1024,
+    "fps": 2.0,
+    "max_frames": 120,
+    "image_patch_size": 16,
+    "jpeg_quality": 85,
+    "prompt_name": "video-description",
+    "prompt_label": "production",
+    "fallback_prompt": "Describe the video.",
+}
+
+
+def load_config(path: Optional[Path] = None) -> dict:
+    """Load config from YAML; env and CLI can override later."""
+    p = path or CONFIG_PATH
+    out = _DEFAULTS.copy()
+    if not p.is_file():
+        return out
+    try:
+        import yaml
+        with open(p, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        for k, v in data.items():
+            if v is not None and k in out:
+                out[k] = v
+    except Exception as e:
+        print(f"{LOG_PREFIX} Could not load config {p}: {e}", file=sys.stderr)
+    return out
+
 
 def get_token() -> str:
     token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
@@ -47,148 +74,120 @@ def get_token() -> str:
     return token
 
 
-def extract_frames_qwen_vl_utils(
+def _langfuse_configured() -> bool:
+    return bool(
+        os.environ.get("LANGFUSE_SECRET_KEY") and os.environ.get("LANGFUSE_PUBLIC_KEY")
+    )
+
+
+def resolve_prompt(
+    cfg: dict,
+    ab_labels: Optional[List[str]] = None,
+) -> tuple[str, Any]:
+    """(prompt_text, langfuse_prompt_or_none). Uses fallback on error or when Langfuse not configured."""
+    fallback = (cfg["fallback_prompt"] or _DEFAULTS["fallback_prompt"]).strip()
+    if not _langfuse_configured():
+        return (fallback, None)
+    try:
+        langfuse = get_client()
+        name = cfg["prompt_name"]
+        if ab_labels and len(ab_labels) >= 2:
+            prompts = [langfuse.get_prompt(name, label=lbl.strip()) for lbl in ab_labels]
+            selected = random.choice(prompts)
+        else:
+            selected = langfuse.get_prompt(name, label=cfg["prompt_label"] or "production")
+        raw = selected.compile() if hasattr(selected, "compile") else str(selected.prompt)
+        if isinstance(raw, list):
+            parts = [m.get("content", "") for m in raw if isinstance(m, dict) and m.get("role") == "user"]
+            raw = parts[-1] if parts else fallback
+        return (str(raw).strip() or fallback, selected)
+    except Exception as e:
+        print(f"{LOG_PREFIX} Langfuse prompt fetch failed, using fallback: {e}", file=sys.stderr)
+        return (fallback, None)
+
+
+def _video_to_frames(
     path: str,
-    fps: float = 2.0,
-    max_frames: int = 120,
-    image_patch_size: int = 16,
-) -> List[str]:
-    """
-    Use qwen-vl-utils to load and sample the video (fps, resize), then return
-    a list of base64 JPEG strings for each frame. Compatible with Qwen3-VL sampling.
-    """
-    if not _QWEN_VL_UTILS_AVAILABLE or process_vision_info is None:
-        raise RuntimeError("qwen-vl-utils is not installed")
+    fps: float,
+    max_frames: int,
+    prompt_text: str,
+    image_patch_size: int,
+) -> List[Any]:
+    """Load video with qwen-vl-utils; return list of (C,H,W) tensors (uint8-ready, max max_frames)."""
     if not os.path.isfile(path):
         print(f"Error: Video file not found: {path}", file=sys.stderr)
         sys.exit(1)
-    abs_path = os.path.abspath(path)
-    # qwen-vl-utils does video_path[7:] for "file://", so we must not use "file:///C:/..."
-    # or it becomes "/C:/..." on Windows. Use "file://" + path so remainder is C:/... or /...
-    path_for_url = abs_path.replace("\\", "/")
-    file_url = "file://" + path_for_url
-    messages = [
-        [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "video",
-                        "video": file_url,
-                        "fps": fps,
-                    },
-                    {"type": "text", "text": PROMPT},
-                ],
-            }
-        ]
-    ]
-    t0 = time.perf_counter()
+    file_url = "file://" + os.path.abspath(path).replace("\\", "/")
+    messages = [[{"role": "user", "content": [{"type": "video", "video": file_url, "fps": fps}, {"type": "text", "text": prompt_text}]}]]
     try:
-        image_inputs, video_inputs, video_kwargs = process_vision_info(
-            messages,
-            return_video_kwargs=True,
-            return_video_metadata=True,
-            image_patch_size=image_patch_size,
+        _, video_inputs, _ = process_vision_info(
+            messages, return_video_kwargs=True, return_video_metadata=True, image_patch_size=image_patch_size
         )
     except Exception as e:
         print(f"Error: qwen-vl-utils failed: {e}", file=sys.stderr)
         sys.exit(1)
-    if not video_inputs or len(video_inputs) == 0:
+    if not video_inputs:
         print("Error: No video output from process_vision_info.", file=sys.stderr)
         sys.exit(1)
-    video_item = video_inputs[0]
-    if isinstance(video_item, tuple):
-        video_tensor = video_item[0]
-    else:
-        video_tensor = video_item
-    # Shape (T, C, H, W), float in [0, 1] after resize
-    try:
-        from PIL import Image as PILImage
-    except ImportError as e:
-        print(f"Error: qwen-vl-utils path needs Pillow: {e}", file=sys.stderr)
-        sys.exit(1)
-    t_process = time.perf_counter() - t0
-    print(f"{LOG_PREFIX} qwen-vl-utils process_vision_info: {t_process:.2f}s", file=sys.stderr)
-    T = video_tensor.shape[0]
-    frames_b64: List[str] = []
-    t_encode = time.perf_counter()
-    for i in range(min(T, max_frames)):
-        frame = video_tensor[i]  # (C, H, W)
-        arr = frame.permute(1, 2, 0).cpu().numpy()
-        # qwen-vl-utils returns float in [0, 255] (from torchvision/decord/torchcodec), not [0, 1]
-        arr = arr.clip(0, 255).astype("uint8")
-        buf = io.BytesIO()
-        PILImage.fromarray(arr).save(buf, format="JPEG", quality=85)
-        frames_b64.append(base64.standard_b64encode(buf.getvalue()).decode("ascii"))
-    print(f"{LOG_PREFIX} encode {len(frames_b64)} frames to JPEG: {time.perf_counter() - t_encode:.2f}s", file=sys.stderr)
-    return frames_b64
+    item = video_inputs[0]
+    tensor = item[0] if isinstance(item, tuple) else item
+    T = tensor.shape[0]
+    return [tensor[i] for i in range(min(T, max_frames))]
 
 
-def extract_frames_qwen_vl_utils_to_dir(
+def extract_frames_qwen_vl_utils(
     path: str,
-    output_dir: str = "frames",
-    fps: float = 2.0,
-    max_frames: int = 120,
+    fps: float,
+    max_frames: int,
+    prompt_text: str,
     image_patch_size: int = 16,
-    open_folder: bool = True,
+    jpeg_quality: int = 85,
 ) -> List[str]:
-    """
-    Use qwen-vl-utils to load/sample the video and save each frame as a JPEG file.
-    Returns the list of saved file paths. Optionally opens the output folder.
-    """
-    if not _QWEN_VL_UTILS_AVAILABLE or process_vision_info is None:
-        raise RuntimeError("qwen-vl-utils is not installed")
-    if not os.path.isfile(path):
-        print(f"Error: Video file not found: {path}", file=sys.stderr)
-        sys.exit(1)
+    """Return base64 JPEG strings for each sampled frame."""
     try:
         from PIL import Image as PILImage
     except ImportError as e:
         print(f"Error: Pillow required: {e}", file=sys.stderr)
         sys.exit(1)
-    abs_path = os.path.abspath(path)
-    path_for_url = abs_path.replace("\\", "/")
-    file_url = "file://" + path_for_url
-    messages = [
-        [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "video", "video": file_url, "fps": fps},
-                    {"type": "text", "text": PROMPT},
-                ],
-            }
-        ]
-    ]
     t0 = time.perf_counter()
+    frames = _video_to_frames(path, fps, max_frames, prompt_text, image_patch_size)
+    print(f"{LOG_PREFIX} process_vision_info: {time.perf_counter() - t0:.2f}s", file=sys.stderr)
+    out = []
+    for frame in frames:
+        arr = frame.permute(1, 2, 0).cpu().numpy().clip(0, 255).astype("uint8")
+        buf = io.BytesIO()
+        PILImage.fromarray(arr).save(buf, format="JPEG", quality=jpeg_quality)
+        out.append(base64.standard_b64encode(buf.getvalue()).decode("ascii"))
+    print(f"{LOG_PREFIX} encode {len(out)} frames: {time.perf_counter() - t0:.2f}s", file=sys.stderr)
+    return out
+
+
+def extract_frames_to_dir(
+    path: str,
+    output_dir: str,
+    fps: float,
+    max_frames: int,
+    prompt_text: str,
+    image_patch_size: int = 16,
+    jpeg_quality: int = 85,
+    open_folder: bool = True,
+) -> List[str]:
+    """Save sampled frames as JPEGs; return list of paths."""
     try:
-        image_inputs, video_inputs, video_kwargs = process_vision_info(
-            messages,
-            return_video_kwargs=True,
-            return_video_metadata=True,
-            image_patch_size=image_patch_size,
-        )
-    except Exception as e:
-        print(f"Error: qwen-vl-utils failed: {e}", file=sys.stderr)
+        from PIL import Image as PILImage
+    except ImportError as e:
+        print(f"Error: Pillow required: {e}", file=sys.stderr)
         sys.exit(1)
-    if not video_inputs or len(video_inputs) == 0:
-        print("Error: No video output from process_vision_info.", file=sys.stderr)
-        sys.exit(1)
-    video_item = video_inputs[0]
-    video_tensor = video_item[0] if isinstance(video_item, tuple) else video_item
-    T = video_tensor.shape[0]
+    t0 = time.perf_counter()
+    frames = _video_to_frames(path, fps, max_frames, prompt_text, image_patch_size)
     os.makedirs(output_dir, exist_ok=True)
-    saved_paths: List[str] = []
-    n_save = min(T, max_frames)
-    for i in range(n_save):
-        frame = video_tensor[i]
-        arr = frame.permute(1, 2, 0).cpu().numpy()
-        # qwen-vl-utils returns float in [0, 255], not [0, 1]; do not multiply by 255
-        arr = arr.clip(0, 255).astype("uint8")
-        out_path = os.path.join(output_dir, f"frame_{i:03d}.jpg")
-        PILImage.fromarray(arr).save(out_path, format="JPEG", quality=85)
-        saved_paths.append(out_path)
-    print(f"{LOG_PREFIX} saved {len(saved_paths)} frames to {os.path.abspath(output_dir)} in {time.perf_counter() - t0:.2f}s", file=sys.stderr)
+    paths = []
+    for i, frame in enumerate(frames):
+        arr = frame.permute(1, 2, 0).cpu().numpy().clip(0, 255).astype("uint8")
+        p = os.path.join(output_dir, f"frame_{i:03d}.jpg")
+        PILImage.fromarray(arr).save(p, format="JPEG", quality=jpeg_quality)
+        paths.append(p)
+    print(f"{LOG_PREFIX} saved {len(paths)} frames to {os.path.abspath(output_dir)} in {time.perf_counter() - t0:.2f}s", file=sys.stderr)
     if open_folder:
         abs_out = os.path.abspath(output_dir)
         if sys.platform == "win32":
@@ -197,204 +196,120 @@ def extract_frames_qwen_vl_utils_to_dir(
             subprocess.run(["open", abs_out], check=False)
         else:
             subprocess.run(["xdg-open", abs_out], check=False)
-    return saved_paths
-
-
-def extract_frame_base64(path: str, frame_index: int | None = None) -> str:
-    """Analyze the video and extract all significant events. Output the results strictly as a CSV with the following headers: Timestamp_Start, Timestamp_End, Event_Description, Confidence_Score.
-    """
-    t0 = time.perf_counter()
-    if not os.path.isfile(path):
-        print(f"Error: Video file not found: {path}", file=sys.stderr)
-        sys.exit(1)
-    cap = cv2.VideoCapture(path)
-    if not cap.isOpened():
-        print(f"Error: Could not open video: {path}", file=sys.stderr)
-        sys.exit(1)
-    try:
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        if total_frames <= 0:
-            total_frames = 1
-        idx = frame_index if frame_index is not None else total_frames // 2
-        idx = min(max(0, idx), total_frames - 1)
-        cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-        ok, frame = cap.read()
-        if not ok or frame is None:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            ok, frame = cap.read()
-        if not ok or frame is None:
-            print("Error: Could not read any frame from video.", file=sys.stderr)
-            sys.exit(1)
-        _, buf = cv2.imencode(".jpg", frame)
-        out = base64.standard_b64encode(buf.tobytes()).decode("ascii")
-        print(f"{LOG_PREFIX} opencv extract 1 frame: {time.perf_counter() - t0:.2f}s", file=sys.stderr)
-        return out
-    finally:
-        cap.release()
+    return paths
 
 
 def describe_video(
     video_path: str,
     base_url: str,
     token: str,
-    model: str = "Qwen/Qwen3-VL-8B-Instruct",
-    max_tokens: int = 1024,
-    backend: str = "opencv",
-    video_fps: float = 2.0,
-    max_frames: int = 120,
+    cfg: dict,
+    prompt_text: str,
+    langfuse_prompt: Any = None,
+    trace_metadata: Optional[dict] = None,
 ) -> str:
-    url = base_url.rstrip("/") + CHAT_PATH
-    # Endpoint expects image data; send frame(s) as JPEG (one or multiple).
-    t_total = time.perf_counter()
-    content: List[dict] = []
-    t_video = time.perf_counter()
-    if backend == "qwen-vl-utils" and _QWEN_VL_UTILS_AVAILABLE:
-        try:
-            frames_b64 = extract_frames_qwen_vl_utils(
-                video_path, fps=video_fps, max_frames=max_frames
-            )
-            for b64 in frames_b64:
-                content.append({
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
-                })
-        except RuntimeError:
-            backend = "opencv"
-    if backend == "opencv" or not content:
-        frame_b64 = extract_frame_base64(video_path)
-        content.append({
-            "type": "image_url",
-            "image_url": {"url": f"data:image/jpeg;base64,{frame_b64}"},
-        })
-    content.append({"type": "text", "text": PROMPT})
-    print(f"{LOG_PREFIX} video processing ({backend}): {time.perf_counter() - t_video:.2f}s, {len(content) - 1} image(s)", file=sys.stderr)
+    """Call HF endpoint with sampled frames; return description text."""
+    t0 = time.perf_counter()
+    frames_b64 = extract_frames_qwen_vl_utils(
+        video_path,
+        cfg["fps"],
+        cfg["max_frames"],
+        prompt_text,
+        cfg.get("image_patch_size", 16),
+        cfg.get("jpeg_quality", 85),
+    )
+    content = [{"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}} for b64 in frames_b64]
+    content.append({"type": "text", "text": prompt_text})
+    print(f"{LOG_PREFIX} video processing: {len(content) - 1} image(s)", file=sys.stderr)
 
-    messages = [{"role": "user", "content": content}]
+    client = LangfuseOpenAI(base_url=base_url.rstrip("/") + "/v1", api_key=token)
+    kwargs = {"model": cfg["model"], "messages": [{"role": "user", "content": content}], "max_tokens": cfg["max_tokens"]}
+    if langfuse_prompt is not None:
+        kwargs["langfuse_prompt"] = langfuse_prompt
+    if trace_metadata:
+        kwargs["metadata"] = trace_metadata
 
-    payload = {
-        "model": model,
-        "messages": messages,
-        "max_tokens": max_tokens,
-    }
-
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-    }
-
-    t_api = time.perf_counter()
-    resp = requests.post(url, json=payload, headers=headers, timeout=120)
-    print(f"{LOG_PREFIX} API request: {time.perf_counter() - t_api:.2f}s", file=sys.stderr)
-
-    if not resp.ok:
-        print(f"Error: Request failed with status {resp.status_code}", file=sys.stderr)
-        try:
-            body = resp.json()
-            print(body, file=sys.stderr)
-        except Exception:
-            print(resp.text[:500], file=sys.stderr)
+    t1 = time.perf_counter()
+    try:
+        resp = client.chat.completions.create(**kwargs)
+    except Exception as e:
+        print(f"Error: Request failed: {e}", file=sys.stderr)
         sys.exit(1)
+    print(f"{LOG_PREFIX} API: {time.perf_counter() - t1:.2f}s, total: {time.perf_counter() - t0:.2f}s", file=sys.stderr)
 
-    data = resp.json()
-    if "choices" not in data or not data["choices"]:
-        print("Error: Unexpected response shape (no choices).", file=sys.stderr)
-        print(data, file=sys.stderr)
+    if not resp.choices or not resp.choices[0].message.content:
+        print("Error: No content in response.", file=sys.stderr)
         sys.exit(1)
-
-    message = data["choices"][0].get("message")
-    if not message or "content" not in message:
-        print("Error: No message content in response.", file=sys.stderr)
-        print(data, file=sys.stderr)
-        sys.exit(1)
-
-    print(f"{LOG_PREFIX} total: {time.perf_counter() - t_total:.2f}s", file=sys.stderr)
-    return message["content"].strip()
+    return resp.choices[0].message.content.strip()
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Get a description of a video clip from a Hugging Face VL endpoint."
-    )
-    parser.add_argument(
-        "video",
-        nargs="?",
-        default=DEFAULT_VIDEO,
-        help=f"Path to video file (default: {DEFAULT_VIDEO})",
-    )
-    parser.add_argument(
-        "--endpoint",
-        default=DEFAULT_ENDPOINT,
-        help=f"Endpoint base URL (default: {DEFAULT_ENDPOINT})",
-    )
-    parser.add_argument(
-        "--model",
-        default="Qwen/Qwen3-VL-8B-Instruct",
-        help="Model name for the request",
-    )
-    parser.add_argument(
-        "--max-tokens",
-        type=int,
-        default=1024,
-        help="Max tokens to generate (default: 1024)",
-    )
-    parser.add_argument(
-        "--backend",
-        choices=("opencv", "qwen-vl-utils"),
-        default="opencv",
-        help="Video processing: opencv (single middle frame) or qwen-vl-utils (fps sampling, requires qwen-vl-utils)",
-    )
-    parser.add_argument(
-        "--fps",
-        type=float,
-        default=2.0,
-        help="Target FPS for frame sampling when using --backend qwen-vl-utils (default: 2.0)",
-    )
-    parser.add_argument(
-        "--max-frames",
-        type=int,
-        default=120,
-        help="Max frames when using qwen-vl-utils (default: 120)",
-    )
-    parser.add_argument(
-        "--extract-frames-only",
-        action="store_true",
-        help="Only extract frames with qwen-vl-utils, save as JPEGs, and open the folder (no API call)",
-    )
-    parser.add_argument(
-        "--frames-dir",
-        default="frames",
-        help="Output directory for --extract-frames-only (default: frames)",
-    )
+    cfg = load_config()
+    cfg["endpoint"] = os.environ.get("HF_ENDPOINT") or cfg["endpoint"]
+
+    parser = argparse.ArgumentParser(description="Describe a video via Hugging Face VL endpoint.")
+    parser.add_argument("video", nargs="?", default=cfg["video"], help="Video file path")
+    parser.add_argument("--endpoint", default=cfg["endpoint"], help="Endpoint base URL")
+    parser.add_argument("--model", default=cfg["model"], help="Model name")
+    parser.add_argument("--max-tokens", type=int, default=cfg["max_tokens"], help="Max tokens")
+    parser.add_argument("--fps", type=float, default=cfg["fps"], help="Frame sampling FPS")
+    parser.add_argument("--max-frames", type=int, default=cfg["max_frames"], help="Max frames")
+    parser.add_argument("--frames-dir", default=cfg["frames_dir"], help="Output dir for --extract-frames-only")
+    parser.add_argument("--extract-frames-only", action="store_true", help="Only extract frames to disk, no API")
+    parser.add_argument("--prompt-name", default=cfg["prompt_name"], help="Langfuse prompt name")
+    parser.add_argument("--prompt-label", default=cfg["prompt_label"], help="Langfuse prompt label")
+    parser.add_argument("--ab-prompt-labels", metavar="LABELS", help='A/B prompts: comma-separated labels')
+    parser.add_argument("--model-b", help="Second model for A/B (use with --ab-test-models)")
+    parser.add_argument("--ab-test-models", action="store_true", help="A/B test --model vs --model-b")
+    parser.add_argument("--config", type=Path, help="Config YAML path (default: config.yaml next to script)")
     args = parser.parse_args()
 
+    cfg = load_config(args.config if args.config else None)
+    # Env / CLI overrides
+    cfg["video"] = args.video
+    cfg["endpoint"] = args.endpoint
+    cfg["model"] = args.model
+    cfg["max_tokens"] = args.max_tokens
+    cfg["fps"] = args.fps
+    cfg["max_frames"] = args.max_frames
+    cfg["frames_dir"] = args.frames_dir
+    cfg["prompt_name"] = args.prompt_name
+    cfg["prompt_label"] = args.prompt_label
+
     if args.extract_frames_only:
-        print(f"{LOG_PREFIX} video={args.video!r} fps={args.fps} max_frames={args.max_frames}", file=sys.stderr)
-        paths = extract_frames_qwen_vl_utils_to_dir(
-            path=args.video,
-            output_dir=args.frames_dir,
-            fps=args.fps,
-            max_frames=args.max_frames,
-            open_folder=True,
+        prompt_text = (cfg.get("fallback_prompt") or _DEFAULTS["fallback_prompt"]).strip()
+        paths = extract_frames_to_dir(
+            args.video, cfg["frames_dir"], cfg["fps"], cfg["max_frames"], prompt_text,
+            cfg.get("image_patch_size", 16), cfg.get("jpeg_quality", 85), open_folder=True
         )
         for p in paths:
             print(p)
         return
 
     token = get_token()
-    print(f"{LOG_PREFIX} video={args.video!r} backend={args.backend}", file=sys.stderr)
+    ab_labels = [x.strip() for x in (args.ab_prompt_labels or "").split(",") if x.strip()] if args.ab_prompt_labels else None
+    prompt_text, langfuse_prompt = resolve_prompt(cfg, ab_labels=ab_labels if ab_labels and len(ab_labels) >= 2 else None)
+
+    model = cfg["model"]
+    trace_metadata = {}
+    if args.ab_test_models and args.model_b:
+        use_a = random.random() < 0.5
+        model = args.model if use_a else args.model_b
+        trace_metadata["ab_model"] = "a" if use_a else "b"
+        print(f"{LOG_PREFIX} A/B model: {trace_metadata['ab_model']} -> {model}", file=sys.stderr)
+    cfg["model"] = model
+
+    print(f"{LOG_PREFIX} video={args.video!r}", file=sys.stderr)
     t0 = time.perf_counter()
-    description = describe_video(
-        video_path=args.video,
-        base_url=args.endpoint,
-        token=token,
-        model=args.model,
-        max_tokens=args.max_tokens,
-        backend=args.backend,
-        video_fps=args.fps,
-        max_frames=args.max_frames,
-    )
-    print(f"{LOG_PREFIX} wall time: {time.perf_counter() - t0:.2f}s", file=sys.stderr)
-    print(description)
+    out = describe_video(args.video, cfg["endpoint"], token, cfg, prompt_text, langfuse_prompt, trace_metadata or None)
+    print(f"{LOG_PREFIX} wall: {time.perf_counter() - t0:.2f}s", file=sys.stderr)
+    print(out)
+
+    if _langfuse_configured():
+        try:
+            get_client().flush()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
