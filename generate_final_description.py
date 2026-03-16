@@ -12,11 +12,11 @@ from pathlib import Path
 
 from openai import OpenAI
 
-from utils import get_token, load_config, load_scenes_csv
+from utils import get_token, load_config, load_scenes_csv, resolve_chat_prompt
 
 LOG_PREFIX = "[generate_final_description]"
 
-SYSTEM_PROMPT = """\
+FALLBACK_SYSTEM_PROMPT = """\
 You are an expert Audio Describer creating accessibility tracks for visually \
 impaired audiences. Your task is to take a chronological sequence of raw, \
 AI-generated video shot descriptions and merge them into a single, seamless, \
@@ -32,16 +32,16 @@ clothing, facial expressions. Do not guess motivations or internal thoughts.
 4. TTS-READY: Output must be immediately ready for Text-to-Speech. No timestamps, \
 labels, or conversational filler. Output ONLY the spoken narrative."""
 
-DEFAULT_ENDPOINT = "https://d3hbhiiq7llzxs1q.us-east-1.aws.endpoints.huggingface.cloud"
-
-USER_PROMPT_INTRO = (
-    "Please merge the following chronological sequence of shots "
-    "into a single continuous audio description:"
+FALLBACK_USER_INTRO = (
+    "Merge the following shots into a single continuous audio description. "
+    "Output ONLY the final description, no other text."
 )
 
+DEFAULT_ENDPOINT = "https://d3hbhiiq7llzxs1q.us-east-1.aws.endpoints.huggingface.cloud"
 
-def build_prompt(rows: list[dict]) -> str:
-    parts = [USER_PROMPT_INTRO, ""]
+
+def build_prompt(rows: list[dict], user_intro: str) -> str:
+    parts = [user_intro, ""]
     for row in rows:
         scene_id = row.get("scene_id", "?")
         start = row.get("start_time", "")
@@ -54,7 +54,8 @@ def build_prompt(rows: list[dict]) -> str:
 def generate_final_description(
     user_prompt: str, base_url: str, token: str,
     model: str, max_tokens: int,
-    system_prompt: str = SYSTEM_PROMPT,
+    system_prompt: str = FALLBACK_SYSTEM_PROMPT,
+    temperature: float = 0.7,
 ) -> str:
     client = OpenAI(base_url=base_url.rstrip("/") + "/v1", api_key=token)
     resp = client.chat.completions.create(
@@ -64,6 +65,7 @@ def generate_final_description(
             {"role": "user", "content": user_prompt},
         ],
         max_tokens=max_tokens,
+        temperature=temperature,
     )
     if not resp.choices or not resp.choices[0].message.content:
         print("Error: No content in response.", file=sys.stderr)
@@ -72,7 +74,6 @@ def generate_final_description(
 
 
 def _resolve_csv(args) -> Path:
-    """Determine the CSV path from CLI arguments."""
     if args.csv:
         return Path(args.csv)
     if args.video:
@@ -95,6 +96,7 @@ def main() -> None:
     endpoint = os.environ.get("HF_FINAL_ENDPOINT") or cfg.get("final_endpoint") or DEFAULT_ENDPOINT
     model = os.environ.get("HF_FINAL_MODEL") or cfg.get("final_model", "mistralai/Mistral-Nemo-Instruct-2407")
     max_tokens = cfg.get("final_max_tokens", 2048)
+    temperature = cfg.get("final_temperature", 0.7)
 
     parser = argparse.ArgumentParser(
         description="Generate a merged video description from scene CSV."
@@ -105,6 +107,7 @@ def main() -> None:
     parser.add_argument("--endpoint", default=endpoint)
     parser.add_argument("--model", default=model)
     parser.add_argument("--max-tokens", type=int, default=max_tokens)
+    parser.add_argument("--temperature", type=float, default=temperature)
     parser.add_argument("--output", "-o", metavar="FILE")
     args = parser.parse_args()
 
@@ -121,14 +124,23 @@ def main() -> None:
         print("Error: CSV must have a 'description' column. Run describe_video.py first.", file=sys.stderr)
         sys.exit(1)
 
-    prompt = build_prompt(rows)
+    # Resolve prompt from Langfuse (or fallback)
+    prompt_name = cfg.get("prompt_scene_merge", "scene-merge")
+    label = cfg.get("prompt_label", "production")
+    system_prompt, user_intro, _ = resolve_chat_prompt(
+        prompt_name, label, FALLBACK_SYSTEM_PROMPT, FALLBACK_USER_INTRO,
+    )
+
+    user_prompt = build_prompt(rows, user_intro)
     token = get_token()
 
     print(f"{LOG_PREFIX} endpoint={args.endpoint!r} model={args.model!r}", file=sys.stderr)
     print(f"{LOG_PREFIX} scenes={len(rows)} from {csv_path}", file=sys.stderr)
 
     result = generate_final_description(
-        prompt, args.endpoint, token, args.model, args.max_tokens,
+        user_prompt, args.endpoint, token, args.model, args.max_tokens,
+        system_prompt=system_prompt,
+        temperature=args.temperature,
     )
 
     if args.output:

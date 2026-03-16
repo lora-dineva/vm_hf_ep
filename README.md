@@ -2,12 +2,12 @@
 
 Automated video description pipeline using vision-language models on Hugging Face Inference Endpoints.
 
-Given a video file, the pipeline:
+Each pipeline run produces two descriptions of the same video and compares them:
 
-1. Splits it into scenes (PySceneDetect or TransNetV2).
-2. Describes each scene with Qwen3-VL.
-3. Merges scene descriptions into a single narrative suitable for audio description / accessibility.
-4. Produces a Markdown report (with PDF export) containing run parameters and output.
+- **Approach A (scene-based):** Split into scenes, describe each scene, merge into one narrative.
+- **Approach B (full video):** Send the entire video in one pass, then style the raw output.
+
+Both outputs go through a styling model and can be converted to audio.
 
 ## Setup
 
@@ -17,7 +17,7 @@ pip install -r requirements.txt
 
 Create a `.env` file from `.env.example`. At minimum, set `HF_TOKEN`.
 
-Edit `config.yaml` to adjust defaults (video path, endpoints, models, sampling parameters). CLI arguments override config values.
+Edit `config.yaml` to adjust defaults (endpoints, models, sampling, TTS).
 
 ## Usage
 
@@ -25,39 +25,22 @@ Edit `config.yaml` to adjust defaults (video path, endpoints, models, sampling p
 
 ```bash
 python run_pipeline.py video.mp4
-python run_pipeline.py video.mp4 --detector content --report my_report.md
-python run_pipeline.py video.mp4 --skip-split          # reuse existing scenes
-python run_pipeline.py video.mp4 --detector transnetv2  # use TransNetV2 instead
+python run_pipeline.py video.mp4 --detector adaptive
+python run_pipeline.py video.mp4 --skip-split        # reuse existing scenes
+python run_pipeline.py video.mp4 --no-audio           # skip TTS
 ```
 
-This runs all steps and writes `report.md` + `report.pdf`.
+Outputs `report.md` + `report.pdf` with parameters, per-scene descriptions, and both final descriptions side by side.
 
 ### Individual scripts
 
-Split scenes:
-
 ```bash
 python split_scenes.py video.mp4 -o scenes
-python split_scenes.py video.mp4 --list-only
-```
-
-Describe scenes:
-
-```bash
-python describe_video.py video.mp4
+python split_scenes_transnetv2.py video.mp4 -o scenes
 python describe_video.py --scenes-dir scenes
-```
-
-Merge into final description:
-
-```bash
-python generate_final_description.py scenes/video_scenes.csv
-python generate_final_description.py --video video.mp4 -o final.txt
-```
-
-Convert Markdown to PDF:
-
-```bash
+python describe_full_video.py video.mp4 -o output.txt
+python generate_final_description.py scenes/video_scenes.csv -o final.txt
+python generate_audio.py final.txt -o output.wav
 python md_to_pdf.py report.md
 ```
 
@@ -66,14 +49,16 @@ python md_to_pdf.py report.md
 ```
 config.yaml                  - pipeline configuration
 utils.py                     - shared helpers (token, CSV, config, ffmpeg)
-run_pipeline.py              - end-to-end orchestrator
+run_pipeline.py              - end-to-end orchestrator (both approaches)
 split_scenes.py              - scene detection (PySceneDetect)
-split_scenes_transnetv2.py   - scene detection (TransNetV2, optional)
+split_scenes_transnetv2.py   - scene detection (TransNetV2)
 describe_video.py            - per-scene description via Qwen3-VL
+describe_full_video.py       - full-video description (vision + styling)
 generate_final_description.py - merge scene descriptions into one narrative
+generate_audio.py            - text-to-speech (Kokoro-82M)
 md_to_pdf.py                 - Markdown to PDF conversion
 ```
 
 ## Optional: Langfuse
 
-Set `LANGFUSE_SECRET_KEY`, `LANGFUSE_PUBLIC_KEY`, and `LANGFUSE_BASE_URL` in `.env` to enable prompt management, token tracking, and A/B testing through [Langfuse](https://langfuse.com).
+Set `LANGFUSE_SECRET_KEY`, `LANGFUSE_PUBLIC_KEY`, and `LANGFUSE_BASE_URL` in `.env` to enable prompt management and tracing through [Langfuse](https://langfuse.com).

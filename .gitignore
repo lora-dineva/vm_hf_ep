@@ -10,6 +10,7 @@ frames/
 .vscode/
 *.mp4
 *.jpg
+*.wav
 *.pth
 report.md
 VIDEO_DESCRIPTION_REPORT.md

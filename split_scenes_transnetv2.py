@@ -29,12 +29,24 @@ DEFAULT_VIDEO = "test_clip_60s.mp4"
 DEFAULT_OUTPUT_DIR = "scenes"
 
 
-def _prepend_ffmpeg_to_path() -> None:
+def _setup_ffmpeg() -> None:
+    """Put the ffmpeg binary on PATH and patch ffmpeg-python to use it by full path."""
     exe = get_ffmpeg_exe()
-    if exe:
-        ffmpeg_dir = str(Path(exe).resolve().parent)
-        if ffmpeg_dir not in os.environ.get("PATH", "").split(os.pathsep):
-            os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
+    if not exe:
+        return
+    ffmpeg_dir = str(Path(exe).resolve().parent)
+    if ffmpeg_dir not in os.environ.get("PATH", "").split(os.pathsep):
+        os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
+    try:
+        import ffmpeg._run as _run
+        _orig = _run.run_async
+        def _patched(stream_spec, cmd="ffmpeg", **kwargs):
+            if cmd == "ffmpeg":
+                cmd = exe
+            return _orig(stream_spec, cmd=cmd, **kwargs)
+        _run.run_async = _patched
+    except Exception:
+        pass
 
 
 def _get_video_fps(video_path: str, ffmpeg_exe: str) -> float:
@@ -62,12 +74,12 @@ def main() -> None:
     )
     parser.add_argument("video", nargs="?", default=DEFAULT_VIDEO)
     parser.add_argument("--output-dir", "-o", default=DEFAULT_OUTPUT_DIR)
-    parser.add_argument("--threshold", "-t", type=float, default=0.5)
+    parser.add_argument("--threshold", "-t", type=float, default=0.95)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda", "mps"), default="auto")
     parser.add_argument("--list-only", action="store_true")
     args = parser.parse_args()
 
-    _prepend_ffmpeg_to_path()
+    _setup_ffmpeg()
     ffmpeg_exe = get_ffmpeg_exe()
     if not ffmpeg_exe:
         print("Error: ffmpeg not found. Install ffmpeg or imageio-ffmpeg.", file=sys.stderr)

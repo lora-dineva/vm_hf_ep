@@ -5,7 +5,7 @@ import csv
 import os
 import sys
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from dotenv import load_dotenv
 
@@ -53,9 +53,12 @@ def load_config(path: Optional[Path] = None) -> dict:
         "max_frames": 120,
         "image_patch_size": 16,
         "jpeg_quality": 85,
-        "prompt_name": "video-description",
+        # Langfuse prompt names
         "prompt_label": "production",
-        "fallback_prompt": "Describe the video.",
+        "prompt_scene_description": "video-description",
+        "prompt_scene_merge": "scene-merge",
+        "prompt_full_video_description": "full-video-description",
+        "prompt_full_video_style": "full-video-style",
         # Final description (merge) settings
         "final_endpoint": "",
         "final_model": "mistralai/Mistral-Nemo-Instruct-2407",
@@ -78,6 +81,75 @@ def load_config(path: Optional[Path] = None) -> dict:
     except Exception as e:
         print(f"Warning: Could not load {config_path}: {e}", file=sys.stderr)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Langfuse prompt resolution
+# ---------------------------------------------------------------------------
+
+def langfuse_configured() -> bool:
+    return bool(
+        os.environ.get("LANGFUSE_SECRET_KEY") and os.environ.get("LANGFUSE_PUBLIC_KEY")
+    )
+
+
+def resolve_text_prompt(
+    name: str,
+    label: str,
+    fallback: str,
+) -> tuple[str, Any]:
+    """Fetch a text prompt from Langfuse. Returns (prompt_text, langfuse_prompt_obj_or_None)."""
+    if not langfuse_configured():
+        return (fallback, None)
+    try:
+        from langfuse import get_client
+        langfuse = get_client()
+        prompt = langfuse.get_prompt(name, label=label)
+        raw = prompt.compile() if hasattr(prompt, "compile") else str(prompt.prompt)
+        if isinstance(raw, list):
+            parts = [m.get("content", "") for m in raw
+                     if isinstance(m, dict) and m.get("role") == "user"]
+            raw = parts[-1] if parts else fallback
+        text = str(raw).strip() or fallback
+        return (text, prompt)
+    except Exception as e:
+        print(f"[langfuse] Failed to fetch prompt '{name}': {e}", file=sys.stderr)
+        return (fallback, None)
+
+
+def resolve_chat_prompt(
+    name: str,
+    label: str,
+    fallback_system: str,
+    fallback_user: str,
+) -> tuple[str, str, Any]:
+    """Fetch a chat prompt from Langfuse. Returns (system_text, user_text, langfuse_prompt_obj_or_None)."""
+    if not langfuse_configured():
+        return (fallback_system, fallback_user, None)
+    try:
+        from langfuse import get_client
+        langfuse = get_client()
+        prompt = langfuse.get_prompt(name, label=label, type="chat")
+        raw = prompt.compile() if hasattr(prompt, "compile") else prompt.prompt
+        if isinstance(raw, list):
+            system = ""
+            user = ""
+            for msg in raw:
+                if not isinstance(msg, dict):
+                    continue
+                role = msg.get("role", "")
+                content = msg.get("content", "")
+                if role == "system":
+                    system = content
+                elif role == "user":
+                    user = content
+            system = system.strip() or fallback_system
+            user = user.strip() or fallback_user
+            return (system, user, prompt)
+        return (fallback_system, fallback_user, prompt)
+    except Exception as e:
+        print(f"[langfuse] Failed to fetch chat prompt '{name}': {e}", file=sys.stderr)
+        return (fallback_system, fallback_user, None)
 
 
 def ensure_ffmpeg() -> bool:
