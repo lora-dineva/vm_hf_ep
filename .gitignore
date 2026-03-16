@@ -9,6 +9,7 @@ frames/
 .idea/
 .vscode/
 *.mp4
+*.mxf
 *.jpg
 *.wav
 *.pth

@@ -2,7 +2,7 @@
 # CLI arguments override these values when provided.
 
 # --- Input / output ---
-video: "test_clip_60s.mp4"
+video: "Kilavuz.mxf"
 scenes_dir: "scenes"
 frames_dir: "frames"
 
@@ -16,7 +16,7 @@ max_tokens: 1024
 
 # Video sampling (qwen-vl-utils)
 fps: 2.0
-max_frames: 120
+max_frames: 2000
 image_patch_size: 16
 jpeg_quality: 85
 

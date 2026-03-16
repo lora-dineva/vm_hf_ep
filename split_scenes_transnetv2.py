@@ -25,7 +25,7 @@ from scenedetect.video_splitter import split_video_ffmpeg
 
 from utils import ensure_ffmpeg, get_ffmpeg_exe
 
-DEFAULT_VIDEO = "test_clip_60s.mp4"
+DEFAULT_VIDEO = "Kilavuz.mxf"
 DEFAULT_OUTPUT_DIR = "scenes"
 
 
@@ -74,7 +74,7 @@ def main() -> None:
     )
     parser.add_argument("video", nargs="?", default=DEFAULT_VIDEO)
     parser.add_argument("--output-dir", "-o", default=DEFAULT_OUTPUT_DIR)
-    parser.add_argument("--threshold", "-t", type=float, default=0.95)
+    parser.add_argument("--threshold", "-t", type=float, default=0.9)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda", "mps"), default="auto")
     parser.add_argument("--list-only", action="store_true")
     args = parser.parse_args()
