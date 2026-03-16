@@ -7,9 +7,11 @@ Defaults and overrides: config.yaml (and CLI overrides config).
 
 import argparse
 import base64
+import csv
 import io
 import os
 import random
+import re
 import subprocess
 import sys
 import time
@@ -17,6 +19,32 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 LOG_PREFIX = "[describe_video]"
+SCENE_FILENAME_RE = re.compile(r"-Scene-(\d+)\.mp4$", re.IGNORECASE)
+
+
+def scene_id_from_path(path: Path) -> Optional[int]:
+    """Extract scene number from a path like .../video-Scene-001.mp4. Return None if not a scene file."""
+    m = SCENE_FILENAME_RE.search(path.name)
+    return int(m.group(1)) if m else None
+
+
+def load_scenes_csv(csv_path: Path) -> List[dict]:
+    """Load scene CSV; each row is a dict with keys from header (scene_id, start_time, end_time, ...)."""
+    if not csv_path.is_file():
+        return []
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        return list(reader)
+
+
+def write_scenes_csv(csv_path: Path, rows: List[dict], fieldnames: List[str]) -> None:
+    """Write scene CSV with given rows and column order."""
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        w.writeheader()
+        w.writerows(rows)
+
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -318,12 +346,47 @@ def main() -> None:
         print(f"{LOG_PREFIX} A/B model: {trace_metadata['ab_model']} -> {model}", file=sys.stderr)
     cfg["model"] = model
 
+    # When describing all scenes in a directory, load CSV to add descriptions
+    scene_rows: List[dict] = []
+    scene_csv_path: Optional[Path] = None
+    if len(video_paths) > 1:
+        first_stem = video_paths[0].stem  # e.g. test_clip_60s-Scene-001
+        if "-Scene-" in first_stem:
+            prefix = first_stem.rsplit("-Scene-", 1)[0]
+            scenes_dir = Path(cfg["scenes_dir"])
+            scene_csv_path = scenes_dir / f"{prefix}_scenes.csv"
+            scene_rows = load_scenes_csv(scene_csv_path)
+            if scene_rows:
+                print(f"{LOG_PREFIX} will update {scene_csv_path} with descriptions", file=sys.stderr)
+
+    descriptions_by_id: dict[int, str] = {}
+
     for idx, video_path in enumerate(video_paths, start=1):
         print(f"{LOG_PREFIX} [{idx}/{len(video_paths)}] video={video_path.name!r}", file=sys.stderr)
         t0 = time.perf_counter()
         out = describe_video(str(video_path), cfg["endpoint"], token, cfg, prompt_text, langfuse_prompt, trace_metadata or None)
         print(f"{LOG_PREFIX} wall: {time.perf_counter() - t0:.2f}s", file=sys.stderr)
         print(f"[{video_path.name}] {out}")
+
+        sid = scene_id_from_path(video_path)
+        if sid is not None:
+            descriptions_by_id[sid] = out
+
+    if scene_csv_path and scene_rows and descriptions_by_id:
+        fieldnames = list(scene_rows[0].keys())
+        if "description" not in fieldnames:
+            fieldnames.append("description")
+        for row in scene_rows:
+            sid = row.get("scene_id")
+            if sid is not None:
+                try:
+                    sid_int = int(sid)
+                    if sid_int in descriptions_by_id:
+                        row["description"] = descriptions_by_id[sid_int]
+                except (TypeError, ValueError):
+                    pass
+        write_scenes_csv(scene_csv_path, scene_rows, fieldnames)
+        print(f"{LOG_PREFIX} updated {scene_csv_path} with {len(descriptions_by_id)} description(s)", file=sys.stderr)
 
     if _langfuse_configured():
         try:

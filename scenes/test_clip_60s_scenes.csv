@@ -1,14 +1,14 @@
-scene_id,start_time,end_time
-1,00:00:00.000,00:00:00.440
-2,00:00:00.440,00:00:00.700
-3,00:00:00.700,00:00:01.700
-4,00:00:01.700,00:00:14.600
-5,00:00:14.600,00:00:24.280
-6,00:00:24.280,00:00:28.600
-7,00:00:28.600,00:00:31.160
-8,00:00:31.160,00:00:33.720
-9,00:00:33.720,00:00:42.920
-10,00:00:42.920,00:00:48.000
-11,00:00:48.000,00:00:53.280
-12,00:00:53.280,00:00:59.080
-13,00:00:59.080,00:01:00.000
+scene_id,start_time,end_time,description
+1,00:00:00.000,00:00:00.440,"The screen remains completely black throughout the entire sequence. There are no visual elements, actions, or settings to describe. The scene is silent and devoid of any imagery."
+2,00:00:00.440,00:00:00.700,"In a vast, star-strewn void, two luminous streams—one glowing amber, the other a vibrant green—flow with graceful, opposing arcs. They swirl and intertwine at their center, a dazzling dance of light, while countless tiny sparks drift like cosmic dust around them, painting a scene of serene, celestial motion."
+3,00:00:00.700,00:00:01.700,"A cosmic swirl of golden and green light emerges from the darkness, forming the name “ZEMBEREK” as if forged from starlight. The swirling energy coalesces into a radiant, concentric circular logo, glowing warmly against the star-speckled void. The name settles into place, a beacon of elegance and mystery, signaling the beginning of a cinematic journey."
+4,00:00:01.700,00:00:14.600,"The video opens with a cosmic, star-filled scene where the name “ZEMBEREK” emerges from a glowing, swirling vortex of orange and yellow light, evoking a sense of mystery and grandeur. This fades into a stark black screen, which then reveals the official emblem of the Turkish Ministry of Culture and Tourism — a red, circular seal with a traditional knot design and stars — slowly illuminating and pulsing with energy. Below it, the text “T.C. Kültür ve Turizm Bakanlığı tarafından desteklenmiştir” (Supported by the Ministry of Culture and Tourism) appears, grounding the production in national cultural support. The scene transitions to the TRT Sinema logo, featuring a film clapperboard, accompanied by the text “TRT Ortaklığıyla / In Coproduction with,” indicating a collaborative cinematic effort. The video concludes with a final black screen, leaving a sense of anticipation and artistic professionalism."
+5,00:00:14.600,00:00:24.280,"Two men are driving along a quiet, rural road under a bright, partly cloudy sky. The driver, focused on the road, occasionally glances at the passenger. The passenger, wearing earbuds, is engaged with the car’s infotainment system, tapping and swiping its screen. Their journey through the open countryside is calm and contemplative, marked by the steady hum of the engine and the passing scenery."
+6,00:00:24.280,00:00:28.600,"A man with a gray beard sits in the back of a car, gazing out the window. Outside, a lone wind turbine stands in a vast, golden field under a bright blue sky with scattered clouds. As the car moves forward, the landscape drifts past, revealing more trees and the distant horizon. He appears contemplative, lost in thought as he observes the serene, open countryside."
+7,00:00:28.600,00:00:31.160,"A man drives a car along a cracked, lonely road through a vast, sun-baked field. His passenger sits quietly beside him. In the rearview mirror, the driver’s focused face is reflected, hinting at a journey of quiet contemplation or purpose. The open sky and empty landscape suggest solitude, stretching ahead into the distance."
+8,00:00:31.160,00:00:33.720,"A man in a suit sits in the back of a moving car, gazing out the window at a vast, sunlit landscape. His expression is contemplative as the scenery blurs past, suggesting a journey through open country under a bright, cloud-dappled sky."
+9,00:00:33.720,00:00:42.920,"Two men are driving a car along a quiet, rural road under a bright, sunny sky. The driver, focused ahead, steers steadily as the passenger, wearing earbuds, looks out the window. As they approach a roadblock with warning signs, the driver slows down and glances toward the passenger, their expressions turning serious and alert. The scene suggests they’ve encountered an unexpected obstacle, and a moment of tense, silent communication unfolds between them."
+10,00:00:42.920,00:00:48.000,"The screen begins in darkness. A sleek, white arrow icon emerges, pointing right. Letters appear one by one, forming the word “KILAVUZ.” The final letter “Z” completes the name, and the arrow icon slides smoothly to the right, leaving the word “KILAVUZ” centered on the black screen. The logo fades out, leaving the screen black once more."
+11,00:00:48.000,00:00:53.280,"A lone figure walks steadily uphill across a vast, sun-baked field of dry, golden stubble. The path they follow is marked by deep tire tracks winding toward the crest of the hill. Above, a wide, clear blue sky is dotted with scattered, fluffy white clouds. The scene is quiet and expansive, evoking a sense of solitude, determination, and peaceful endurance as the person moves toward the distant horizon."
+12,00:00:53.280,00:00:59.080,"A man in a suit, holding his jacket, runs determinedly across a vast, golden field of harvested wheat. His focused expression and steady pace suggest urgency or purpose as he moves toward the camera, the expansive, textured field stretching out behind him under a clear sky."
+13,00:00:59.080,00:01:00.000,"A lone road winds through endless golden fields under a vast, clear blue sky. The camera glides forward, following the path as it curves gently into the horizon, flanked by rows of sunflowers and dry grass. The scene is peaceful, quiet, and expansive — a solitary journey through the open countryside."

@@ -21,9 +21,3 @@ python describe_video.py --config path/to/config.yaml video.mp4
 ```
 
 **Split video into scenes (PySceneDetect):** `python split_scenes.py [video] --output-dir scenes`. Use `--list-only` to only print scene boundaries. Uses system ffmpeg if on PATH, otherwise the imageio-ffmpeg bundled binary.
-
-**Langfuse: prompt and A/B testing**
-
-- Create a prompt named `video-description` in Langfuse (text type, e.g. "Describe the video.") and assign a label (e.g. `production`). The script fetches it by default; without Langfuse env it uses a built-in fallback.
-- **Prompt A/B:** Create two versions with labels e.g. `prod-a` and `prod-b`, then run with `--ab-prompt-labels "prod-a,prod-b"` to randomly use one per run; compare metrics in Langfuse by prompt version.
-- **Model A/B:** Use `--model-b <model_name>` and `--ab-test-models` to randomly call one of two models; filter traces by metadata `ab_model` (a or b) in Langfuse to compare cost and performance.
