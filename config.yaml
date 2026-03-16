@@ -1,16 +1,16 @@
-# Video description app – adjust these values instead of CLI defaults.
-# CLI arguments still override these when provided.
+# Video description pipeline configuration.
+# CLI arguments override these values when provided.
 
-# Input / output
+# --- Input / output ---
 video: "test_clip_60s.mp4"
-frames_dir: "frames"
-# When no video path is given, describe all .mp4 files in this directory (e.g. from split_scenes.py).
 scenes_dir: "scenes"
+frames_dir: "frames"
 
-# Hugging Face endpoint (override with HF_ENDPOINT env or --endpoint)
+# --- Scene splitting ---
+scene_detector: "transnetv2"        # transnetv2 | adaptive | content | threshold
+
+# --- Scene description (Qwen3-VL) ---
 endpoint: "https://rjk11aiy6oefykan.us-east-1.aws.endpoints.huggingface.cloud"
-
-# Model and generation
 model: "Qwen/Qwen3-VL-8B-Instruct"
 max_tokens: 1024
 
@@ -20,12 +20,12 @@ max_frames: 120
 image_patch_size: 16
 jpeg_quality: 85
 
-# Langfuse prompt (when Langfuse env is set)
+# Langfuse prompt management (requires LANGFUSE env vars)
 prompt_name: "video-description"
 prompt_label: "production"
-# Fallback prompt text when Langfuse is not used or fetch fails
 fallback_prompt: "Describe the video."
 
-# A/B testing (leave empty or omit to disable)
-# ab_prompt_labels: "prod-a,prod-b"
-# model_b: "Other/Model-Name"
+# --- Final description (merge scenes into one narrative) ---
+final_endpoint: ""                  # blank = use HF_FINAL_ENDPOINT env or built-in default
+final_model: "mistralai/Mistral-Nemo-Instruct-2407"
+final_max_tokens: 2048

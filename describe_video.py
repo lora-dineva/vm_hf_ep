@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-Send a video file to a Hugging Face Inference Endpoint (Qwen3-VL) and print
-the model's description. Video processing uses qwen-vl-utils (fps/resize sampling).
-Defaults and overrides: config.yaml (and CLI overrides config).
+Describe video scenes via a Hugging Face Inference Endpoint (Qwen3-VL).
+Frames are sampled with qwen-vl-utils. Config lives in config.yaml; CLI overrides it.
 """
 
 import argparse
 import base64
-import csv
 import io
 import os
 import random
@@ -18,90 +16,24 @@ import time
 from pathlib import Path
 from typing import Any, List, Optional
 
+from langfuse import get_client
+from langfuse.openai import OpenAI as LangfuseOpenAI
+from qwen_vl_utils import process_vision_info
+
+from utils import get_token, load_config, load_scenes_csv, write_scenes_csv
+
 LOG_PREFIX = "[describe_video]"
 SCENE_FILENAME_RE = re.compile(r"-Scene-(\d+)\.mp4$", re.IGNORECASE)
 
 
 def scene_id_from_path(path: Path) -> Optional[int]:
-    """Extract scene number from a path like .../video-Scene-001.mp4. Return None if not a scene file."""
     m = SCENE_FILENAME_RE.search(path.name)
     return int(m.group(1)) if m else None
 
 
-def load_scenes_csv(csv_path: Path) -> List[dict]:
-    """Load scene CSV; each row is a dict with keys from header (scene_id, start_time, end_time, ...)."""
-    if not csv_path.is_file():
-        return []
-    with open(csv_path, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        return list(reader)
-
-
-def write_scenes_csv(csv_path: Path, rows: List[dict], fieldnames: List[str]) -> None:
-    """Write scene CSV with given rows and column order."""
-    csv_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(csv_path, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
-        w.writeheader()
-        w.writerows(rows)
-
-
-from dotenv import load_dotenv
-load_dotenv()
-
-from langfuse import get_client
-from langfuse.openai import OpenAI as LangfuseOpenAI
-from qwen_vl_utils import process_vision_info
-
-# -----------------------------------------------------------------------------
-# Config (config.yaml + env overrides)
-# -----------------------------------------------------------------------------
-
-CONFIG_PATH = Path(__file__).resolve().parent / "config.yaml"
-CHAT_PATH = "/v1/chat/completions"
-
-_DEFAULTS = {
-    "video": "test_clip_60s.mp4",
-    "frames_dir": "frames",
-    "scenes_dir": "scenes",
-    "endpoint": "https://rjk11aiy6oefykan.us-east-1.aws.endpoints.huggingface.cloud",
-    "model": "Qwen/Qwen3-VL-8B-Instruct",
-    "max_tokens": 1024,
-    "fps": 2.0,
-    "max_frames": 120,
-    "image_patch_size": 16,
-    "jpeg_quality": 85,
-    "prompt_name": "video-description",
-    "prompt_label": "production",
-    "fallback_prompt": "Describe the video.",
-}
-
-
-def load_config(path: Optional[Path] = None) -> dict:
-    """Load config from YAML; env and CLI can override later."""
-    p = path or CONFIG_PATH
-    out = _DEFAULTS.copy()
-    if not p.is_file():
-        return out
-    try:
-        import yaml
-        with open(p, encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-        for k, v in data.items():
-            if v is not None and k in out:
-                out[k] = v
-    except Exception as e:
-        print(f"{LOG_PREFIX} Could not load config {p}: {e}", file=sys.stderr)
-    return out
-
-
-def get_token() -> str:
-    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
-    if not token:
-        print("Error: Set HF_TOKEN in .env or HUGGING_FACE_HUB_TOKEN.", file=sys.stderr)
-        sys.exit(1)
-    return token
-
+# ---------------------------------------------------------------------------
+# Langfuse prompt resolution
+# ---------------------------------------------------------------------------
 
 def _langfuse_configured() -> bool:
     return bool(
@@ -109,12 +41,8 @@ def _langfuse_configured() -> bool:
     )
 
 
-def resolve_prompt(
-    cfg: dict,
-    ab_labels: Optional[List[str]] = None,
-) -> tuple[str, Any]:
-    """(prompt_text, langfuse_prompt_or_none). Uses fallback on error or when Langfuse not configured."""
-    fallback = (cfg["fallback_prompt"] or _DEFAULTS["fallback_prompt"]).strip()
+def resolve_prompt(cfg: dict, ab_labels: Optional[List[str]] = None) -> tuple[str, Any]:
+    fallback = (cfg["fallback_prompt"] or "Describe the video.").strip()
     if not _langfuse_configured():
         return (fallback, None)
     try:
@@ -135,22 +63,29 @@ def resolve_prompt(
         return (fallback, None)
 
 
+# ---------------------------------------------------------------------------
+# Frame extraction
+# ---------------------------------------------------------------------------
+
 def _video_to_frames(
-    path: str,
-    fps: float,
-    max_frames: int,
-    prompt_text: str,
-    image_patch_size: int,
-) -> List[Any]:
-    """Load video with qwen-vl-utils; return list of (C,H,W) tensors (uint8-ready, max max_frames)."""
+    path: str, fps: float, max_frames: int,
+    prompt_text: str, image_patch_size: int,
+) -> list:
     if not os.path.isfile(path):
         print(f"Error: Video file not found: {path}", file=sys.stderr)
         sys.exit(1)
     file_url = "file://" + os.path.abspath(path).replace("\\", "/")
-    messages = [[{"role": "user", "content": [{"type": "video", "video": file_url, "fps": fps}, {"type": "text", "text": prompt_text}]}]]
+    messages = [[{
+        "role": "user",
+        "content": [
+            {"type": "video", "video": file_url, "fps": fps},
+            {"type": "text", "text": prompt_text},
+        ],
+    }]]
     try:
         _, video_inputs, _ = process_vision_info(
-            messages, return_video_kwargs=True, return_video_metadata=True, image_patch_size=image_patch_size
+            messages, return_video_kwargs=True,
+            return_video_metadata=True, image_patch_size=image_patch_size,
         )
     except Exception as e:
         print(f"Error: qwen-vl-utils failed: {e}", file=sys.stderr)
@@ -160,24 +95,16 @@ def _video_to_frames(
         sys.exit(1)
     item = video_inputs[0]
     tensor = item[0] if isinstance(item, tuple) else item
-    T = tensor.shape[0]
-    return [tensor[i] for i in range(min(T, max_frames))]
+    return [tensor[i] for i in range(min(tensor.shape[0], max_frames))]
 
 
-def extract_frames_qwen_vl_utils(
-    path: str,
-    fps: float,
-    max_frames: int,
-    prompt_text: str,
-    image_patch_size: int = 16,
-    jpeg_quality: int = 85,
+def extract_frames_b64(
+    path: str, fps: float, max_frames: int,
+    prompt_text: str, image_patch_size: int = 16, jpeg_quality: int = 85,
 ) -> List[str]:
     """Return base64 JPEG strings for each sampled frame."""
-    try:
-        from PIL import Image as PILImage
-    except ImportError as e:
-        print(f"Error: Pillow required: {e}", file=sys.stderr)
-        sys.exit(1)
+    from PIL import Image as PILImage
+
     t0 = time.perf_counter()
     frames = _video_to_frames(path, fps, max_frames, prompt_text, image_patch_size)
     print(f"{LOG_PREFIX} process_vision_info: {time.perf_counter() - t0:.2f}s", file=sys.stderr)
@@ -187,26 +114,18 @@ def extract_frames_qwen_vl_utils(
         buf = io.BytesIO()
         PILImage.fromarray(arr).save(buf, format="JPEG", quality=jpeg_quality)
         out.append(base64.standard_b64encode(buf.getvalue()).decode("ascii"))
-    print(f"{LOG_PREFIX} encode {len(out)} frames: {time.perf_counter() - t0:.2f}s", file=sys.stderr)
+    print(f"{LOG_PREFIX} encoded {len(out)} frames: {time.perf_counter() - t0:.2f}s", file=sys.stderr)
     return out
 
 
 def extract_frames_to_dir(
-    path: str,
-    output_dir: str,
-    fps: float,
-    max_frames: int,
-    prompt_text: str,
-    image_patch_size: int = 16,
-    jpeg_quality: int = 85,
-    open_folder: bool = True,
+    path: str, output_dir: str, fps: float, max_frames: int,
+    prompt_text: str, image_patch_size: int = 16,
+    jpeg_quality: int = 85, open_folder: bool = True,
 ) -> List[str]:
-    """Save sampled frames as JPEGs; return list of paths."""
-    try:
-        from PIL import Image as PILImage
-    except ImportError as e:
-        print(f"Error: Pillow required: {e}", file=sys.stderr)
-        sys.exit(1)
+    """Save sampled frames as JPEGs to disk; return list of paths."""
+    from PIL import Image as PILImage
+
     t0 = time.perf_counter()
     frames = _video_to_frames(path, fps, max_frames, prompt_text, image_patch_size)
     os.makedirs(output_dir, exist_ok=True)
@@ -216,7 +135,8 @@ def extract_frames_to_dir(
         p = os.path.join(output_dir, f"frame_{i:03d}.jpg")
         PILImage.fromarray(arr).save(p, format="JPEG", quality=jpeg_quality)
         paths.append(p)
-    print(f"{LOG_PREFIX} saved {len(paths)} frames to {os.path.abspath(output_dir)} in {time.perf_counter() - t0:.2f}s", file=sys.stderr)
+    elapsed = time.perf_counter() - t0
+    print(f"{LOG_PREFIX} saved {len(paths)} frames to {os.path.abspath(output_dir)} in {elapsed:.2f}s", file=sys.stderr)
     if open_folder:
         abs_out = os.path.abspath(output_dir)
         if sys.platform == "win32":
@@ -228,31 +148,34 @@ def extract_frames_to_dir(
     return paths
 
 
+# ---------------------------------------------------------------------------
+# API call
+# ---------------------------------------------------------------------------
+
 def describe_video(
-    video_path: str,
-    base_url: str,
-    token: str,
-    cfg: dict,
-    prompt_text: str,
-    langfuse_prompt: Any = None,
+    video_path: str, base_url: str, token: str, cfg: dict,
+    prompt_text: str, langfuse_prompt: Any = None,
     trace_metadata: Optional[dict] = None,
 ) -> str:
-    """Call HF endpoint with sampled frames; return description text."""
+    """Send sampled frames to HF endpoint; return description text."""
     t0 = time.perf_counter()
-    frames_b64 = extract_frames_qwen_vl_utils(
-        video_path,
-        cfg["fps"],
-        cfg["max_frames"],
-        prompt_text,
-        cfg.get("image_patch_size", 16),
-        cfg.get("jpeg_quality", 85),
+    frames_b64 = extract_frames_b64(
+        video_path, cfg["fps"], cfg["max_frames"], prompt_text,
+        cfg.get("image_patch_size", 16), cfg.get("jpeg_quality", 85),
     )
-    content = [{"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}} for b64 in frames_b64]
+    content = [
+        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
+        for b64 in frames_b64
+    ]
     content.append({"type": "text", "text": prompt_text})
-    print(f"{LOG_PREFIX} video processing: {len(content) - 1} image(s)", file=sys.stderr)
+    print(f"{LOG_PREFIX} prepared {len(frames_b64)} frame(s)", file=sys.stderr)
 
     client = LangfuseOpenAI(base_url=base_url.rstrip("/") + "/v1", api_key=token)
-    kwargs = {"model": cfg["model"], "messages": [{"role": "user", "content": content}], "max_tokens": cfg["max_tokens"]}
+    kwargs: dict[str, Any] = {
+        "model": cfg["model"],
+        "messages": [{"role": "user", "content": content}],
+        "max_tokens": cfg["max_tokens"],
+    }
     if langfuse_prompt is not None:
         kwargs["langfuse_prompt"] = langfuse_prompt
     if trace_metadata:
@@ -262,7 +185,7 @@ def describe_video(
     try:
         resp = client.chat.completions.create(**kwargs)
     except Exception as e:
-        print(f"Error: Request failed: {e}", file=sys.stderr)
+        print(f"Error: API request failed: {e}", file=sys.stderr)
         sys.exit(1)
     print(f"{LOG_PREFIX} API: {time.perf_counter() - t1:.2f}s, total: {time.perf_counter() - t0:.2f}s", file=sys.stderr)
 
@@ -272,31 +195,34 @@ def describe_video(
     return resp.choices[0].message.content.strip()
 
 
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
+
 def main() -> None:
     cfg = load_config()
     cfg["endpoint"] = os.environ.get("HF_ENDPOINT") or cfg["endpoint"]
 
     parser = argparse.ArgumentParser(description="Describe a video via Hugging Face VL endpoint.")
-    parser.add_argument("video", nargs="?", default=None, help="Video file path (if omitted, describe all .mp4 in --scenes-dir)")
-    parser.add_argument("--scenes-dir", default=cfg.get("scenes_dir") or "scenes", help="Directory of scene .mp4 files when no video path is given")
-    parser.add_argument("--endpoint", default=cfg["endpoint"], help="Endpoint base URL")
-    parser.add_argument("--model", default=cfg["model"], help="Model name")
-    parser.add_argument("--max-tokens", type=int, default=cfg["max_tokens"], help="Max tokens")
-    parser.add_argument("--fps", type=float, default=cfg["fps"], help="Frame sampling FPS")
-    parser.add_argument("--max-frames", type=int, default=cfg["max_frames"], help="Max frames")
-    parser.add_argument("--frames-dir", default=cfg["frames_dir"], help="Output dir for --extract-frames-only")
-    parser.add_argument("--extract-frames-only", action="store_true", help="Only extract frames to disk, no API")
-    parser.add_argument("--prompt-name", default=cfg["prompt_name"], help="Langfuse prompt name")
-    parser.add_argument("--prompt-label", default=cfg["prompt_label"], help="Langfuse prompt label")
-    parser.add_argument("--ab-prompt-labels", metavar="LABELS", help='A/B prompts: comma-separated labels')
-    parser.add_argument("--model-b", help="Second model for A/B (use with --ab-test-models)")
-    parser.add_argument("--ab-test-models", action="store_true", help="A/B test --model vs --model-b")
-    parser.add_argument("--config", type=Path, help="Config YAML path (default: config.yaml next to script)")
+    parser.add_argument("video", nargs="?", default=None)
+    parser.add_argument("--scenes-dir", default=cfg.get("scenes_dir", "scenes"))
+    parser.add_argument("--endpoint", default=cfg["endpoint"])
+    parser.add_argument("--model", default=cfg["model"])
+    parser.add_argument("--max-tokens", type=int, default=cfg["max_tokens"])
+    parser.add_argument("--fps", type=float, default=cfg["fps"])
+    parser.add_argument("--max-frames", type=int, default=cfg["max_frames"])
+    parser.add_argument("--frames-dir", default=cfg["frames_dir"])
+    parser.add_argument("--extract-frames-only", action="store_true")
+    parser.add_argument("--prompt-name", default=cfg["prompt_name"])
+    parser.add_argument("--prompt-label", default=cfg["prompt_label"])
+    parser.add_argument("--ab-prompt-labels", metavar="LABELS")
+    parser.add_argument("--model-b")
+    parser.add_argument("--ab-test-models", action="store_true")
+    parser.add_argument("--config", type=Path)
     args = parser.parse_args()
 
-    cfg = load_config(args.config if args.config else None)
-    # Env / CLI overrides
-    cfg["scenes_dir"] = getattr(args, "scenes_dir", None) or cfg.get("scenes_dir") or "scenes"
+    cfg = load_config(args.config)
+    cfg["scenes_dir"] = args.scenes_dir
     cfg["video"] = args.video
     cfg["endpoint"] = args.endpoint
     cfg["model"] = args.model
@@ -307,13 +233,13 @@ def main() -> None:
     cfg["prompt_name"] = args.prompt_name
     cfg["prompt_label"] = args.prompt_label
 
-    # Resolve video path(s): single file or all .mp4 in scenes_dir
+    # Resolve video paths
     if args.video and Path(args.video).is_file():
         video_paths = [Path(args.video)]
     else:
         scenes_dir = Path(cfg["scenes_dir"])
         if not scenes_dir.is_dir():
-            print(f"Error: No video file given and scenes dir not found: {scenes_dir}", file=sys.stderr)
+            print(f"Error: No video given and scenes dir not found: {scenes_dir}", file=sys.stderr)
             sys.exit(1)
         video_paths = sorted(scenes_dir.glob("*.mp4"))
         if not video_paths:
@@ -322,23 +248,29 @@ def main() -> None:
         print(f"{LOG_PREFIX} describing {len(video_paths)} scene(s) from {scenes_dir}", file=sys.stderr)
 
     if args.extract_frames_only:
-        prompt_text = (cfg.get("fallback_prompt") or _DEFAULTS["fallback_prompt"]).strip()
+        prompt_text = (cfg.get("fallback_prompt") or "Describe the video.").strip()
         for vp in video_paths:
             out_dir = str(Path(cfg["frames_dir"]) / vp.stem) if len(video_paths) > 1 else cfg["frames_dir"]
             paths = extract_frames_to_dir(
                 str(vp), out_dir, cfg["fps"], cfg["max_frames"], prompt_text,
-                cfg.get("image_patch_size", 16), cfg.get("jpeg_quality", 85), open_folder=(vp == video_paths[-1])
+                cfg.get("image_patch_size", 16), cfg.get("jpeg_quality", 85),
+                open_folder=(vp == video_paths[-1]),
             )
             for p in paths:
                 print(p)
         return
 
     token = get_token()
-    ab_labels = [x.strip() for x in (args.ab_prompt_labels or "").split(",") if x.strip()] if args.ab_prompt_labels else None
-    prompt_text, langfuse_prompt = resolve_prompt(cfg, ab_labels=ab_labels if ab_labels and len(ab_labels) >= 2 else None)
+    ab_labels = (
+        [x.strip() for x in args.ab_prompt_labels.split(",") if x.strip()]
+        if args.ab_prompt_labels else None
+    )
+    prompt_text, langfuse_prompt = resolve_prompt(
+        cfg, ab_labels=ab_labels if ab_labels and len(ab_labels) >= 2 else None,
+    )
 
     model = cfg["model"]
-    trace_metadata = {}
+    trace_metadata: dict = {}
     if args.ab_test_models and args.model_b:
         use_a = random.random() < 0.5
         model = args.model if use_a else args.model_b
@@ -346,29 +278,26 @@ def main() -> None:
         print(f"{LOG_PREFIX} A/B model: {trace_metadata['ab_model']} -> {model}", file=sys.stderr)
     cfg["model"] = model
 
-    # When describing all scenes in a directory, load CSV to add descriptions
+    # Load scene CSV if describing a directory of scenes
     scene_rows: List[dict] = []
     scene_csv_path: Optional[Path] = None
     if len(video_paths) > 1:
-        first_stem = video_paths[0].stem  # e.g. test_clip_60s-Scene-001
+        first_stem = video_paths[0].stem
         if "-Scene-" in first_stem:
             prefix = first_stem.rsplit("-Scene-", 1)[0]
-            scenes_dir = Path(cfg["scenes_dir"])
-            scene_csv_path = scenes_dir / f"{prefix}_scenes.csv"
+            scene_csv_path = Path(cfg["scenes_dir"]) / f"{prefix}_scenes.csv"
             scene_rows = load_scenes_csv(scene_csv_path)
             if scene_rows:
                 print(f"{LOG_PREFIX} will update {scene_csv_path} with descriptions", file=sys.stderr)
 
     descriptions_by_id: dict[int, str] = {}
-
-    for idx, video_path in enumerate(video_paths, start=1):
-        print(f"{LOG_PREFIX} [{idx}/{len(video_paths)}] video={video_path.name!r}", file=sys.stderr)
+    for idx, vp in enumerate(video_paths, start=1):
+        print(f"{LOG_PREFIX} [{idx}/{len(video_paths)}] {vp.name}", file=sys.stderr)
         t0 = time.perf_counter()
-        out = describe_video(str(video_path), cfg["endpoint"], token, cfg, prompt_text, langfuse_prompt, trace_metadata or None)
+        out = describe_video(str(vp), cfg["endpoint"], token, cfg, prompt_text, langfuse_prompt, trace_metadata or None)
         print(f"{LOG_PREFIX} wall: {time.perf_counter() - t0:.2f}s", file=sys.stderr)
-        print(f"[{video_path.name}] {out}")
-
-        sid = scene_id_from_path(video_path)
+        print(f"[{vp.name}] {out}")
+        sid = scene_id_from_path(vp)
         if sid is not None:
             descriptions_by_id[sid] = out
 

@@ -3,10 +3,9 @@ PyYAML>=6.0
 requests>=2.28.0
 langfuse>=2.0.0
 openai>=1.0.0
-# Video sampling (fps, resize); requires torch/torchvision (install separately if needed).
 qwen-vl-utils>=0.0.10
-# Scene detection and splitting; uses imageio-ffmpeg's bundled ffmpeg if system ffmpeg not on PATH.
 scenedetect>=0.6
 imageio-ffmpeg>=0.5.0
-# TransNetV2 scene detection (split_scenes_transnetv2.py); requires Python >=3.10 and weights file.
-transnetv2-pytorch>=1.0.0
+md2pdf
+# TransNetV2 (optional, for split_scenes_transnetv2.py)
+# transnetv2-pytorch>=1.0.0
