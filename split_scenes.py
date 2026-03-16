@@ -81,7 +81,10 @@ def main() -> None:
         sys.exit(1)
 
     detector_class = DETECTORS[args.detector]
-    detector = detector_class()
+    if args.detector == "adaptive":
+        detector = AdaptiveDetector(min_content_val=25.0, min_scene_len=30)
+    else:
+        detector = detector_class()
     scene_list = detect(str(video_path), detector)
 
     if not scene_list:
