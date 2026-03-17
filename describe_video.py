@@ -20,7 +20,7 @@ from langfuse.openai import OpenAI as LangfuseOpenAI
 from qwen_vl_utils import process_vision_info
 
 from utils import (
-    get_token, load_config, load_scenes_csv, write_scenes_csv,
+    get_token, load_config, load_scenes_csv, log_run, write_scenes_csv,
     langfuse_configured, resolve_text_prompt,
 )
 
@@ -265,6 +265,7 @@ def main() -> None:
             if scene_rows:
                 print(f"{LOG_PREFIX} will update {scene_csv_path} with descriptions", file=sys.stderr)
 
+    t_total = time.perf_counter()
     descriptions_by_id: dict[int, str] = {}
     for idx, vp in enumerate(video_paths, start=1):
         print(f"{LOG_PREFIX} [{idx}/{len(video_paths)}] {vp.name}", file=sys.stderr)
@@ -276,6 +277,7 @@ def main() -> None:
         if sid is not None:
             descriptions_by_id[sid] = out
 
+    outputs: list[str] = []
     if scene_csv_path and scene_rows and descriptions_by_id:
         fieldnames = list(scene_rows[0].keys())
         if "description" not in fieldnames:
@@ -290,7 +292,20 @@ def main() -> None:
                 except (TypeError, ValueError):
                     pass
         write_scenes_csv(scene_csv_path, scene_rows, fieldnames)
+        outputs.append(str(scene_csv_path))
         print(f"{LOG_PREFIX} updated {scene_csv_path} with {len(descriptions_by_id)} description(s)", file=sys.stderr)
+
+    elapsed = time.perf_counter() - t_total
+    log_run("describe_video.py", {
+        "scenes_dir": cfg["scenes_dir"],
+        "scene_count": len(video_paths),
+        "model": cfg["model"],
+        "endpoint": cfg["endpoint"],
+        "fps": cfg["fps"],
+        "max_frames": cfg["max_frames"],
+        "max_tokens": cfg["max_tokens"],
+        "prompt_label": cfg["prompt_label"],
+    }, elapsed, outputs)
 
     if langfuse_configured():
         try:

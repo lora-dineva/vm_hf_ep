@@ -2,14 +2,18 @@
 """Shared utilities for the video description pipeline."""
 
 import csv
+import json
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, List, Optional
 
 from dotenv import load_dotenv
 
 load_dotenv()
+
+RUNS_LOG = Path(__file__).resolve().parent / "runs.jsonl"
 
 
 def get_token() -> str:
@@ -151,6 +155,34 @@ def resolve_chat_prompt(
         print(f"[langfuse] Failed to fetch chat prompt '{name}': {e}", file=sys.stderr)
         return (fallback_system, fallback_user, None)
 
+
+# ---------------------------------------------------------------------------
+# Run logging
+# ---------------------------------------------------------------------------
+
+def log_run(
+    script: str,
+    params: dict,
+    elapsed_s: float,
+    outputs: list[str],
+    log_file: Path = RUNS_LOG,
+) -> None:
+    """Append a single run record to the JSONL log file."""
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "script": script,
+        "params": params,
+        "elapsed_s": round(elapsed_s, 2),
+        "outputs": outputs,
+    }
+    with open(log_file, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    print(f"[log] recorded run in {log_file}", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
+# FFmpeg helpers
+# ---------------------------------------------------------------------------
 
 def ensure_ffmpeg() -> bool:
     """Ensure ffmpeg is available (system PATH or imageio-ffmpeg bundle).

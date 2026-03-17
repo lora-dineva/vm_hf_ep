@@ -12,10 +12,10 @@ scene_detector: "transnetv2"        # transnetv2 | adaptive | content | threshol
 # --- Scene description (Qwen3-VL) ---
 endpoint: "https://rjk11aiy6oefykan.us-east-1.aws.endpoints.huggingface.cloud"
 model: "Qwen/Qwen3-VL-8B-Instruct"
-max_tokens: 1024
+max_tokens: 400
 
 # Video sampling (qwen-vl-utils)
-fps: 2.0
+fps: 1.0
 max_frames: 2000
 image_patch_size: 16
 jpeg_quality: 85
@@ -30,7 +30,7 @@ prompt_full_video_style: "full-video-style"
 # --- Final description (merge scenes into one narrative) ---
 final_endpoint: "https://lkw0d0u41rx93n0c.us-east-1.aws.endpoints.huggingface.cloud"
 final_model: "mistralai/Mistral-Small-24B-Instruct-2501"
-final_max_tokens: 1024
+final_max_tokens: 10000
 final_temperature: 0.3
 
 # --- Text-to-speech (audio from final description) ---

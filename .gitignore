@@ -15,3 +15,5 @@ frames/
 *.pth
 report.md
 VIDEO_DESCRIPTION_REPORT.md
+runs.jsonl
+~$*

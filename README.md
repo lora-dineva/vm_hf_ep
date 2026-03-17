@@ -2,12 +2,7 @@
 
 Automated video description pipeline using vision-language models on Hugging Face Inference Endpoints.
 
-Each pipeline run produces two descriptions of the same video and compares them:
-
-- **Approach A (scene-based):** Split into scenes, describe each scene, merge into one narrative.
-- **Approach B (full video):** Send the entire video in one pass, then style the raw output.
-
-Both outputs go through a styling model and can be converted to audio.
+Two independent approaches for generating descriptions, plus shared styling and audio steps.
 
 ## Setup
 
@@ -19,46 +14,79 @@ Create a `.env` file from `.env.example`. At minimum, set `HF_TOKEN`.
 
 Edit `config.yaml` to adjust defaults (endpoints, models, sampling, TTS).
 
-## Usage
+## Approach 1: Full Video
 
-### Full pipeline (recommended)
+Describe the entire video in a single pass with Qwen3-VL, then style and generate audio.
 
 ```bash
-python run_pipeline.py video.mp4
-python run_pipeline.py video.mp4 --detector adaptive
-python run_pipeline.py video.mp4 --skip-split        # reuse existing scenes
-python run_pipeline.py video.mp4 --no-audio           # skip TTS
+# 1. Vision: raw description
+python describe_full_video.py video.mxf -o scenes/raw.txt
+
+# 2. Style with LLM
+python style_description.py scenes/raw.txt -o scenes/styled.txt
+
+# 3. Audio
+python generate_audio.py scenes/styled.txt -o scenes/audio.wav
 ```
 
-Outputs `report.md` + `report.pdf` with parameters, per-scene descriptions, and both final descriptions side by side.
+## Approach 2: Scene-Based
 
-### Individual scripts
+Split the video into scenes, describe each one, then style and generate per-scene audio.
 
 ```bash
-python split_scenes.py video.mp4 -o scenes
-python split_scenes_transnetv2.py video.mp4 -o scenes
+# 1. Split into scenes
+python split_scenes_transnetv2.py video.mxf -o scenes
+
+# 2. Describe each scene
 python describe_video.py --scenes-dir scenes
-python describe_full_video.py video.mp4 -o output.txt
-python generate_final_description.py scenes/video_scenes.csv -o final.txt
-python generate_audio.py final.txt -o output.wav
-python md_to_pdf.py report.md
+
+# 3. Style (merge scenes into one narrative)
+python style_description.py scenes/video_scenes.csv -o scenes/styled.txt
+
+# 4. Audio (one .wav per scene)
+python generate_audio.py scenes/video_scenes.csv --output-dir scenes/audio/
 ```
 
-## Project structure
+## Styling Options
+
+`style_description.py` auto-detects the input type (CSV = scene merge, text = full-video rewrite).
+
+```bash
+# Override Langfuse prompt label
+python style_description.py input.txt --prompt-label experiment_v2 -o out.txt
+
+# Override Langfuse prompt name
+python style_description.py input.csv --prompt-name my-custom-prompt -o out.txt
+
+# Adjust model parameters
+python style_description.py input.txt --temperature 0.3 --max-tokens 4096 -o out.txt
+```
+
+## Run Log
+
+Every script run is recorded in `runs.jsonl` (one JSON object per line) with:
+- timestamp, script name, parameters, processing time, output file paths
+
+```bash
+# View recent runs
+python -c "import json, pathlib; [print(json.dumps(json.loads(l), indent=2)) for l in pathlib.Path('runs.jsonl').read_text().splitlines()[-3:]]"
+```
+
+## Project Structure
 
 ```
-config.yaml                  - pipeline configuration
-utils.py                     - shared helpers (token, CSV, config, ffmpeg)
-run_pipeline.py              - end-to-end orchestrator (both approaches)
-split_scenes.py              - scene detection (PySceneDetect)
-split_scenes_transnetv2.py   - scene detection (TransNetV2)
-describe_video.py            - per-scene description via Qwen3-VL
-describe_full_video.py       - full-video description (vision + styling)
-generate_final_description.py - merge scene descriptions into one narrative
-generate_audio.py            - text-to-speech (Kokoro-82M)
-md_to_pdf.py                 - Markdown to PDF conversion
+config.yaml                - pipeline configuration
+utils.py                   - shared helpers (token, CSV, config, Langfuse, ffmpeg, run log)
+describe_full_video.py     - full-video description via Qwen3-VL (vision only)
+split_scenes.py            - scene detection (PySceneDetect)
+split_scenes_transnetv2.py - scene detection (TransNetV2)
+describe_video.py          - per-scene description via Qwen3-VL
+style_description.py       - style any description with an LLM (scene merge or full-video)
+generate_audio.py          - text-to-speech (single file or per-scene CSV)
 ```
 
-## Optional: Langfuse
+## Langfuse Integration
 
 Set `LANGFUSE_SECRET_KEY`, `LANGFUSE_PUBLIC_KEY`, and `LANGFUSE_BASE_URL` in `.env` to enable prompt management and tracing through [Langfuse](https://langfuse.com).
+
+Prompt names and labels are configured in `config.yaml` and can be overridden via CLI (`--prompt-label`, `--prompt-name`).
