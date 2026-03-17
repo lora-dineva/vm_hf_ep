@@ -9,7 +9,11 @@ frames/
 .idea/
 .vscode/
 *.mp4
+*.mxf
 *.jpg
+*.wav
 *.pth
 report.md
 VIDEO_DESCRIPTION_REPORT.md
+runs.jsonl
+~$*

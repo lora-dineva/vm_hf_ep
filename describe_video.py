@@ -16,51 +16,22 @@ import time
 from pathlib import Path
 from typing import Any, List, Optional
 
-from langfuse import get_client
 from langfuse.openai import OpenAI as LangfuseOpenAI
 from qwen_vl_utils import process_vision_info
 
-from utils import get_token, load_config, load_scenes_csv, write_scenes_csv
+from utils import (
+    get_token, load_config, load_scenes_csv, log_run, write_scenes_csv,
+    langfuse_configured, resolve_text_prompt,
+)
 
 LOG_PREFIX = "[describe_video]"
 SCENE_FILENAME_RE = re.compile(r"-Scene-(\d+)\.mp4$", re.IGNORECASE)
+FALLBACK_PROMPT = "Describe the video."
 
 
 def scene_id_from_path(path: Path) -> Optional[int]:
     m = SCENE_FILENAME_RE.search(path.name)
     return int(m.group(1)) if m else None
-
-
-# ---------------------------------------------------------------------------
-# Langfuse prompt resolution
-# ---------------------------------------------------------------------------
-
-def _langfuse_configured() -> bool:
-    return bool(
-        os.environ.get("LANGFUSE_SECRET_KEY") and os.environ.get("LANGFUSE_PUBLIC_KEY")
-    )
-
-
-def resolve_prompt(cfg: dict, ab_labels: Optional[List[str]] = None) -> tuple[str, Any]:
-    fallback = (cfg["fallback_prompt"] or "Describe the video.").strip()
-    if not _langfuse_configured():
-        return (fallback, None)
-    try:
-        langfuse = get_client()
-        name = cfg["prompt_name"]
-        if ab_labels and len(ab_labels) >= 2:
-            prompts = [langfuse.get_prompt(name, label=lbl.strip()) for lbl in ab_labels]
-            selected = random.choice(prompts)
-        else:
-            selected = langfuse.get_prompt(name, label=cfg["prompt_label"] or "production")
-        raw = selected.compile() if hasattr(selected, "compile") else str(selected.prompt)
-        if isinstance(raw, list):
-            parts = [m.get("content", "") for m in raw if isinstance(m, dict) and m.get("role") == "user"]
-            raw = parts[-1] if parts else fallback
-        return (str(raw).strip() or fallback, selected)
-    except Exception as e:
-        print(f"{LOG_PREFIX} Langfuse prompt fetch failed, using fallback: {e}", file=sys.stderr)
-        return (fallback, None)
 
 
 # ---------------------------------------------------------------------------
@@ -213,7 +184,6 @@ def main() -> None:
     parser.add_argument("--max-frames", type=int, default=cfg["max_frames"])
     parser.add_argument("--frames-dir", default=cfg["frames_dir"])
     parser.add_argument("--extract-frames-only", action="store_true")
-    parser.add_argument("--prompt-name", default=cfg["prompt_name"])
     parser.add_argument("--prompt-label", default=cfg["prompt_label"])
     parser.add_argument("--ab-prompt-labels", metavar="LABELS")
     parser.add_argument("--model-b")
@@ -230,7 +200,6 @@ def main() -> None:
     cfg["fps"] = args.fps
     cfg["max_frames"] = args.max_frames
     cfg["frames_dir"] = args.frames_dir
-    cfg["prompt_name"] = args.prompt_name
     cfg["prompt_label"] = args.prompt_label
 
     # Resolve video paths
@@ -248,11 +217,10 @@ def main() -> None:
         print(f"{LOG_PREFIX} describing {len(video_paths)} scene(s) from {scenes_dir}", file=sys.stderr)
 
     if args.extract_frames_only:
-        prompt_text = (cfg.get("fallback_prompt") or "Describe the video.").strip()
         for vp in video_paths:
             out_dir = str(Path(cfg["frames_dir"]) / vp.stem) if len(video_paths) > 1 else cfg["frames_dir"]
             paths = extract_frames_to_dir(
-                str(vp), out_dir, cfg["fps"], cfg["max_frames"], prompt_text,
+                str(vp), out_dir, cfg["fps"], cfg["max_frames"], FALLBACK_PROMPT,
                 cfg.get("image_patch_size", 16), cfg.get("jpeg_quality", 85),
                 open_folder=(vp == video_paths[-1]),
             )
@@ -261,13 +229,20 @@ def main() -> None:
         return
 
     token = get_token()
-    ab_labels = (
-        [x.strip() for x in args.ab_prompt_labels.split(",") if x.strip()]
-        if args.ab_prompt_labels else None
-    )
-    prompt_text, langfuse_prompt = resolve_prompt(
-        cfg, ab_labels=ab_labels if ab_labels and len(ab_labels) >= 2 else None,
-    )
+
+    # Resolve prompt from Langfuse (or fallback)
+    prompt_name = cfg.get("prompt_scene_description", "video-description")
+    label = cfg["prompt_label"]
+
+    if args.ab_prompt_labels:
+        ab_labels = [x.strip() for x in args.ab_prompt_labels.split(",") if x.strip()]
+        if len(ab_labels) >= 2:
+            chosen_label = random.choice(ab_labels)
+            prompt_text, langfuse_prompt = resolve_text_prompt(prompt_name, chosen_label, FALLBACK_PROMPT)
+        else:
+            prompt_text, langfuse_prompt = resolve_text_prompt(prompt_name, label, FALLBACK_PROMPT)
+    else:
+        prompt_text, langfuse_prompt = resolve_text_prompt(prompt_name, label, FALLBACK_PROMPT)
 
     model = cfg["model"]
     trace_metadata: dict = {}
@@ -290,6 +265,7 @@ def main() -> None:
             if scene_rows:
                 print(f"{LOG_PREFIX} will update {scene_csv_path} with descriptions", file=sys.stderr)
 
+    t_total = time.perf_counter()
     descriptions_by_id: dict[int, str] = {}
     for idx, vp in enumerate(video_paths, start=1):
         print(f"{LOG_PREFIX} [{idx}/{len(video_paths)}] {vp.name}", file=sys.stderr)
@@ -301,6 +277,7 @@ def main() -> None:
         if sid is not None:
             descriptions_by_id[sid] = out
 
+    outputs: list[str] = []
     if scene_csv_path and scene_rows and descriptions_by_id:
         fieldnames = list(scene_rows[0].keys())
         if "description" not in fieldnames:
@@ -315,10 +292,24 @@ def main() -> None:
                 except (TypeError, ValueError):
                     pass
         write_scenes_csv(scene_csv_path, scene_rows, fieldnames)
+        outputs.append(str(scene_csv_path))
         print(f"{LOG_PREFIX} updated {scene_csv_path} with {len(descriptions_by_id)} description(s)", file=sys.stderr)
 
-    if _langfuse_configured():
+    elapsed = time.perf_counter() - t_total
+    log_run("describe_video.py", {
+        "scenes_dir": cfg["scenes_dir"],
+        "scene_count": len(video_paths),
+        "model": cfg["model"],
+        "endpoint": cfg["endpoint"],
+        "fps": cfg["fps"],
+        "max_frames": cfg["max_frames"],
+        "max_tokens": cfg["max_tokens"],
+        "prompt_label": cfg["prompt_label"],
+    }, elapsed, outputs)
+
+    if langfuse_configured():
         try:
+            from langfuse import get_client
             get_client().flush()
         except Exception:
             pass

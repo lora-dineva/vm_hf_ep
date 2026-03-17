@@ -2,7 +2,7 @@
 # CLI arguments override these values when provided.
 
 # --- Input / output ---
-video: "test_clip_60s.mp4"
+video: "Kilavuz.mxf"
 scenes_dir: "scenes"
 frames_dir: "frames"
 
@@ -12,20 +12,27 @@ scene_detector: "transnetv2"        # transnetv2 | adaptive | content | threshol
 # --- Scene description (Qwen3-VL) ---
 endpoint: "https://rjk11aiy6oefykan.us-east-1.aws.endpoints.huggingface.cloud"
 model: "Qwen/Qwen3-VL-8B-Instruct"
-max_tokens: 1024
+max_tokens: 400
 
 # Video sampling (qwen-vl-utils)
-fps: 2.0
-max_frames: 120
+fps: 1.0
+max_frames: 2000
 image_patch_size: 16
 jpeg_quality: 85
 
-# Langfuse prompt management (requires LANGFUSE env vars)
-prompt_name: "video-description"
+# --- Langfuse prompt names (requires LANGFUSE env vars) ---
 prompt_label: "production"
-fallback_prompt: "Describe the video."
+prompt_scene_description: "video-description"
+prompt_scene_merge: "scene-merge"
+prompt_full_video_description: "video-description"
+prompt_full_video_style: "full-video-style"
 
 # --- Final description (merge scenes into one narrative) ---
-final_endpoint: ""                  # blank = use HF_FINAL_ENDPOINT env or built-in default
-final_model: "mistralai/Mistral-Nemo-Instruct-2407"
-final_max_tokens: 2048
+final_endpoint: "https://lkw0d0u41rx93n0c.us-east-1.aws.endpoints.huggingface.cloud"
+final_model: "mistralai/Mistral-Small-24B-Instruct-2501"
+final_max_tokens: 10000
+final_temperature: 0.3
+
+# --- Text-to-speech (audio from final description) ---
+tts_model: "hexgrad/Kokoro-82M"
+tts_provider: "fal-ai"
